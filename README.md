@@ -1,6 +1,6 @@
 # Fileshare
 
-A simple LAN file-sharing server with a web UI. Upload, browse, tag, preview, and edit text files from any device on your local network.
+A simple LAN file-sharing server with a single-page web UI. Upload files from your phone or laptop, browse folders, preview media in the browser, tag and filter content, and edit lyrics sheets — all on your local network.
 
 ## Requirements
 
@@ -48,11 +48,36 @@ To change the storage folder later, open **Settings** (gear icon) → **Change s
 
 ## Features
 
-- Drag-and-drop upload with optional tags (up to 2 per file)
-- Folder browsing, search, sort, and pagination
-- In-browser viewer/editor for `.txt`, `.md`, `.pro`, and `.cho` files
-- Hidden categories — hide tagged files by default and toggle them back on
-- Download counts and soft-delete metadata in SQLite
+### Built-in viewer
+
+Click any file to open it in a full-screen viewer modal:
+
+- **Audio** — custom player with play/pause, seek bar, elapsed/remaining time, and volume (remembered in the browser). Supports MP3, WAV, FLAC, OGG, M4A, AAC, and more.
+- **Video** — in-browser playback with native controls (MP4, MKV, MOV, WebM, etc.).
+- **Images** — JPG, PNG, GIF, WebP, SVG, and other common formats.
+- **PDF** — embedded preview in the viewer.
+- **Text & code** — read `.txt`, `.md`, `.pro`, `.cho`, and many code file types; edit and save `.txt`, `.md`, `.pro`, and `.cho` in place.
+- **Download** — one click from the viewer; download counts are tracked in the database.
+
+### Browse & organize
+
+- Folder navigation with breadcrumbs; folders show recursive size totals.
+- Unified file list with search, sortable columns (name, size, modified, downloads), and pagination.
+- Tag filters switch to a flat cross-folder view for a given tag.
+- **Hidden categories** — hide tagged files by default in Settings, then toggle them back on from the main page.
+- Up to **2 tags per file**; assign tags from the list, viewer, or upload queue.
+
+### Upload & create
+
+- Drag-and-drop or file picker; optional tag applies to the whole upload queue.
+- **New sheet** — create a new lyrics/chord file (`.pro`, `.cho`, etc.) in the current folder.
+- Rename files from the viewer (extension is locked so file types stay valid).
+
+### Other
+
+- **Settings** (gear icon) — manage tags, hide-by-default categories, and change the storage folder.
+- **Restart server** — from the header, without leaving the browser (page reconnects automatically).
+- Shareable URLs — folder path, tag filter, search, sort, and page are reflected in the address bar.
 
 ## Security note
 

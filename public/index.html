@@ -856,7 +856,8 @@
       line-height: 1.45;
     }
     .settings-danger-btn { color: #ff9999; border-color: #4a2a2a; }
-    .settings-danger-btn:hover { background: #2a1515; border-color: #663333; color: #ffb3b3; }
+    .settings-danger-btn:hover:not(:disabled) { background: #2a1515; border-color: #663333; color: #ffb3b3; }
+    .settings-danger-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     #reset-storage-confirm-input {
       width: 100%;
       background: #111;
@@ -1425,7 +1426,7 @@
     <div id="reset-storage-error"></div>
     <div class="modal-footer">
       <button type="button" class="btn-secondary" id="reset-storage-cancel-btn">Cancel</button>
-      <button type="button" class="btn settings-danger-btn" id="reset-storage-confirm-btn" disabled>Reset and choose folder</button>
+      <button type="button" class="btn-secondary settings-danger-btn" id="reset-storage-confirm-btn" disabled>Reset and choose folder</button>
     </div>
   </div>
 </div>
