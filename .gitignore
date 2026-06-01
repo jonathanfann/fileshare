@@ -1,0 +1,9 @@
+node_modules/
+fileshare.db
+fileshare.db-wal
+fileshare.db-shm
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,14 @@
+{
+  "name": "fileshare",
+  "version": "1.0.0",
+  "description": "Local network file sharing server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "express": "^4.19.2",
+    "multer": "^2.0.2"
+  }
+}
