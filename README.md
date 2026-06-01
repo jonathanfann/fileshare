@@ -56,12 +56,13 @@ Click any file to open it in a full-screen viewer modal:
 - **Video** — in-browser playback with native controls (MP4, MKV, MOV, WebM, etc.).
 - **Images** — JPG, PNG, GIF, WebP, SVG, and other common formats.
 - **PDF** — embedded preview in the viewer.
-- **Text & code** — read `.txt`, `.md`, `.pro`, `.cho`, and many code file types; edit and save `.txt`, `.md`, `.pro`, and `.cho` in place.
+- **Text & code** — read many text/code types; **`.md` sheets render as formatted markdown** in the viewer; `.txt` shows as plain text. Edit and save `.txt`, `.md`, `.pro`, and `.cho` in place.
 - **Download** — one click from the viewer; download counts are tracked in the database.
 
 ### Browse & organize
 
-- Folder navigation with breadcrumbs; folders show recursive size totals.
+- **Browse** tab — folder navigation with breadcrumbs; folders show recursive size totals.
+- **Sheets** tab — flat list of markdown and text sheets (`.md`, `.txt`) across folders; tap a folder name to jump to Browse there.
 - Unified file list with search, sortable columns (name, size, modified, downloads), and pagination.
 - Tag filters switch to a flat cross-folder view for a given tag.
 - **Hidden categories** — hide tagged files by default in Settings, then toggle them back on from the main page.
@@ -70,7 +71,7 @@ Click any file to open it in a full-screen viewer modal:
 ### Upload & create
 
 - Drag-and-drop or file picker; optional tag applies to the whole upload queue.
-- **New sheet** — create a new lyrics/chord file (`.pro`, `.cho`, etc.) in the current folder.
+- **New sheet** — create a `.md` or `.txt` file (name + extension dropdown); new markdown files open in the editor with a `# Title` starter.
 - Rename files from the viewer (extension is locked so file types stay valid).
 
 ### Other
@@ -91,5 +92,6 @@ fileshare/
 ├── public/index.html  # Single-page UI
 ├── fileshare.db       # SQLite (gitignored; created at runtime)
 ├── start.bat
-└── start-hidden.vbs
+├── start-hidden.vbs
+└── TODO.md            # Frontend modularization notes for future work
 ```

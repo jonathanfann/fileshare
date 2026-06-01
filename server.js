@@ -259,6 +259,9 @@ function uniqueFilename(dirFull, name) {
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 app.use(express.json());
+app.get('/vendor/marked.min.js', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'node_modules', 'marked', 'marked.min.js'));
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 const storage = multer.diskStorage({
@@ -290,6 +293,8 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const EDITABLE_EXTENSIONS = new Set(['.txt', '.md', '.pro', '.cho']);
+const CREATABLE_SHEET_EXTENSIONS = new Set(['.txt', '.md']);
+const SHEET_VIEW_EXTENSIONS = new Set(['.txt', '.md']);
 
 function fileExtension(name) {
   const i = name.lastIndexOf('.');
@@ -302,6 +307,10 @@ function isTextExtension(ext) {
 
 function isEditableExtension(ext) {
   return EDITABLE_EXTENSIONS.has(ext);
+}
+
+function isSheetFile(name) {
+  return SHEET_VIEW_EXTENSIONS.has(fileExtension(name));
 }
 
 function walkAllFiles(dirRelative, dirFull) {
@@ -627,6 +636,7 @@ app.get('/api/files', requireShareRoot, (req, res) => {
   try {
     const { page, pageSize, query, sort, order } = parseListParams(req);
     const tagFilter = req.query.tag || 'all';
+    const view = req.query.view === 'sheets' ? 'sheets' : 'browse';
 
     const dbMap = {};
     for (const row of stmts.getAllActiveFiles.all()) {
@@ -638,15 +648,24 @@ app.get('/api/files', requireShareRoot, (req, res) => {
     const settings = getAppSettings();
     const shareDir = getShareRoot();
 
-    // Flat cross-folder list when a tag filter is active
-    if (tagFilter !== 'all') {
+    // Flat cross-folder list for tag filters or the Sheets view
+    if (tagFilter !== 'all' || view === 'sheets') {
       const allFsFiles = walkAllFiles('', shareDir);
       let items = buildFileRecords(allFsFiles, dbMap, tagsByFile);
+      if (view === 'sheets') {
+        items = items.filter((f) => isSheetFile(f.name));
+        items = applyCategoryExclusions(
+          items,
+          settings.excludeTags,
+          settings.showTags,
+        );
+      }
       items = applyTagFilter(items, tagFilter);
       items = filterByQuery(items, query);
+      const mode = view === 'sheets' ? 'sheets' : 'flat';
       const result = listResponse(items, page, pageSize, sort, order, {
-        mode: 'flat',
-        filterLabel: filterLabelFor(tagFilter, tags),
+        mode,
+        filterLabel: tagFilter !== 'all' ? filterLabelFor(tagFilter, tags) : null,
         dir: '',
         breadcrumbs: [{ name: 'Home', path: '', clearFilter: true }],
         tags,
@@ -759,14 +778,14 @@ app.post('/api/files/create', requireShareRoot, (req, res) => {
     const dirResolved = safeResolveDir(dirRel);
     if (!dirResolved) return res.status(400).json({ error: 'Invalid folder path' });
 
-    let filename = String(req.body.filename || 'untitled.pro').trim();
+    let filename = String(req.body.filename || 'untitled.md').trim();
     if (!filename) return res.status(400).json({ error: 'Filename required' });
     filename = validateFilename(filename);
     if (!filename) return res.status(400).json({ error: 'Invalid filename' });
 
     const ext = fileExtension(filename);
-    if (!isEditableExtension(ext)) {
-      return res.status(400).json({ error: 'Only .txt, .md, .pro, and .cho files can be created' });
+    if (!CREATABLE_SHEET_EXTENSIONS.has(ext)) {
+      return res.status(400).json({ error: 'Only .txt and .md files can be created' });
     }
 
     const abs = path.join(dirResolved.full, filename);
@@ -779,7 +798,9 @@ app.post('/api/files/create', requireShareRoot, (req, res) => {
       return res.status(409).json({ error: 'File already exists' });
     }
 
-    const defaultContent = ext === '.pro' || ext === '.cho'
+    const defaultContent = ext === '.md'
+      ? '# Untitled\n\n'
+      : ext === '.pro' || ext === '.cho'
       ? '{title: Untitled}\n{artist: }\n\n{start_of_verse}\n[Am]Line with [G]chords\n{end_of_verse}\n'
       : '';
     const content = typeof req.body.content === 'string' ? req.body.content : defaultContent;

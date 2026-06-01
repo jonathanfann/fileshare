@@ -7,3 +7,4 @@ fileshare.db-shm
 *.log
 .DS_Store
 Thumbs.db
+TODO.md
