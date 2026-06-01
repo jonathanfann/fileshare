@@ -8,22 +8,20 @@ const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = 3000;
-const SHARE_DIR = 'D:\\Fileshare';
 const DB_PATH = path.join(__dirname, 'fileshare.db');
+const LEGACY_DEFAULT_SHARE = path.join('D:', 'Fileshare');
 
-if (!fs.existsSync(SHARE_DIR)) {
-  fs.mkdirSync(SHARE_DIR, { recursive: true });
-}
-
-// ── Path safety (all file ops stay under SHARE_DIR) ───────────────────────────
+// ── Path safety (all file ops stay under the configured share root) ───────────
 
 function safeResolveDir(relRaw) {
+  const shareRoot = getShareRoot();
+  if (!shareRoot) return null;
   const rel = String(relRaw || '')
     .replace(/\\/g, '/')
     .replace(/^\/+/, '');
   const parts = rel.split('/').filter((p) => p.length && p !== '.' && p !== '..');
-  const full = path.resolve(SHARE_DIR, ...parts);
-  const root = path.resolve(SHARE_DIR);
+  const full = path.resolve(shareRoot, ...parts);
+  const root = path.resolve(shareRoot);
   const sep = path.sep;
   if (full !== root && !full.startsWith(root + sep)) return null;
   return { full, relative: parts.join('/') };
@@ -45,16 +43,17 @@ function decodeRelPath(q) {
   }
 }
 
-/** Absolute path to a file under SHARE_DIR, or null if invalid / missing / not a file */
+/** Absolute path to a file under the share root, or null if invalid / missing / not a file */
 function resolveExistingFile(rel) {
-  if (!rel) return null;
+  const shareRoot = getShareRoot();
+  if (!shareRoot || !rel) return null;
   const segments = rel.split('/');
   const base = segments.pop();
   if (!base) return null;
   const dirResolved = safeResolveDir(segments.join('/'));
   if (!dirResolved) return null;
   const abs = path.join(dirResolved.full, base);
-  const root = path.resolve(SHARE_DIR);
+  const root = path.resolve(shareRoot);
   const resolvedAbs = path.resolve(abs);
   if (resolvedAbs !== root && !resolvedAbs.startsWith(root + path.sep)) return null;
   try {
@@ -114,7 +113,7 @@ db.prepare(`
 
 const MAX_TAGS_PER_FILE = 2;
 
-// Prepared statements (filename = path relative to SHARE_DIR, e.g. sub/file.txt)
+// Prepared statements (filename = path relative to share root, e.g. sub/file.txt)
 const stmts = {
   getFile: db.prepare('SELECT * FROM files WHERE filename = ?'),
   upsertFile: db.prepare(`
@@ -157,6 +156,75 @@ const stmts = {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `),
 };
+
+let cachedShareRoot = undefined;
+
+function bootstrapShareDir() {
+  const row = stmts.getSetting.get('share_dir');
+  if (row !== undefined) {
+    if (!row.value) {
+      cachedShareRoot = null;
+      return null;
+    }
+    const resolved = path.resolve(row.value);
+    try {
+      if (fs.statSync(resolved).isDirectory()) {
+        cachedShareRoot = resolved;
+        return cachedShareRoot;
+      }
+    } catch { /* invalid or missing path */ }
+    cachedShareRoot = null;
+    return null;
+  }
+  const legacy = path.resolve(LEGACY_DEFAULT_SHARE);
+  if (fs.existsSync(legacy)) {
+    stmts.setSetting.run('share_dir', legacy);
+    cachedShareRoot = legacy;
+    return cachedShareRoot;
+  }
+  cachedShareRoot = null;
+  return null;
+}
+
+function getShareRoot() {
+  if (cachedShareRoot === undefined) bootstrapShareDir();
+  return cachedShareRoot;
+}
+
+function validateShareDirInput(input) {
+  const raw = String(input || '').trim();
+  if (!raw || raw.includes('\0')) return null;
+  const resolved = path.resolve(raw);
+  if (!path.isAbsolute(resolved)) return null;
+  return resolved;
+}
+
+function setShareRoot(absPath) {
+  const resolved = validateShareDirInput(absPath);
+  if (!resolved) throw new Error('Invalid folder path');
+  fs.mkdirSync(resolved, { recursive: true });
+  stmts.setSetting.run('share_dir', resolved);
+  cachedShareRoot = resolved;
+  return resolved;
+}
+
+function clearShareRoot() {
+  stmts.setSetting.run('share_dir', '');
+  cachedShareRoot = null;
+}
+
+const SETUP_RESET_CONFIRM = 'fileshare';
+
+function validateSetupResetConfirm(input) {
+  return String(input || '').trim().toLowerCase() === SETUP_RESET_CONFIRM;
+}
+
+function requireShareRoot(req, res, next) {
+  if (getShareRoot()) return next();
+  res.status(503).json({ error: 'Storage folder not configured', needsSetup: true });
+}
+
+bootstrapShareDir();
 
 const INVALID_WIN_CHARS = /[<>:"/\\|?*\u0000-\u001f]/;
 
@@ -409,6 +477,13 @@ function saveCategorySettings(excludeTags, showTags) {
   return { excludeTags: exclude, showTags: show };
 }
 
+function getAppSettings() {
+  return {
+    ...getCategorySettings(),
+    shareDir: getShareRoot() || '',
+  };
+}
+
 function applyCategoryExclusions(items, excludeTagIds, showTagIds) {
   if (!excludeTagIds.length) return items;
   const exclude = new Set(excludeTagIds);
@@ -503,10 +578,52 @@ function listResponse(items, page, pageSize, sort, order, extra) {
   return { items: pageItems, pagination, sort, order, ...extra };
 }
 
+// ── Setup ─────────────────────────────────────────────────────────────────────
+
+app.get('/api/setup', (_req, res) => {
+  try {
+    const shareDir = getShareRoot();
+    res.json({
+      configured: !!shareDir,
+      shareDir: shareDir || '',
+      suggested: LEGACY_DEFAULT_SHARE,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/setup', (req, res) => {
+  try {
+    if (getShareRoot()) {
+      return res.status(409).json({ error: 'Storage folder is already configured' });
+    }
+    const shareDir = setShareRoot(req.body.shareDir);
+    res.json({ ok: true, shareDir });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Invalid folder path' });
+  }
+});
+
+app.post('/api/setup/reset', (req, res) => {
+  try {
+    if (!getShareRoot()) {
+      return res.status(400).json({ error: 'Storage folder is not configured' });
+    }
+    if (!validateSetupResetConfirm(req.body.confirm)) {
+      return res.status(400).json({ error: 'Confirmation text did not match' });
+    }
+    clearShareRoot();
+    res.json({ ok: true, configured: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── File endpoints ────────────────────────────────────────────────────────────
 
 // List folder contents — unified items with search, sort, pagination
-app.get('/api/files', (req, res) => {
+app.get('/api/files', requireShareRoot, (req, res) => {
   try {
     const { page, pageSize, query, sort, order } = parseListParams(req);
     const tagFilter = req.query.tag || 'all';
@@ -518,12 +635,12 @@ app.get('/api/files', (req, res) => {
 
     const tags = stmts.getAllTags.all();
     const tagsByFile = loadTagsByFilename();
-    const settings = getCategorySettings();
+    const settings = getAppSettings();
+    const shareDir = getShareRoot();
 
     // Flat cross-folder list when a tag filter is active
     if (tagFilter !== 'all') {
-      const root = path.resolve(SHARE_DIR);
-      const allFsFiles = walkAllFiles('', root);
+      const allFsFiles = walkAllFiles('', shareDir);
       let items = buildFileRecords(allFsFiles, dbMap, tagsByFile);
       items = applyTagFilter(items, tagFilter);
       items = filterByQuery(items, query);
@@ -534,6 +651,7 @@ app.get('/api/files', (req, res) => {
         breadcrumbs: [{ name: 'Home', path: '', clearFilter: true }],
         tags,
         settings,
+        shareDir,
       });
       return res.json(result);
     }
@@ -566,6 +684,7 @@ app.get('/api/files', (req, res) => {
       breadcrumbs,
       tags,
       settings,
+      shareDir,
     });
     res.json(result);
   } catch (err) {
@@ -574,7 +693,7 @@ app.get('/api/files', (req, res) => {
 });
 
 // Text file content for viewer/editor
-app.get('/api/content', (req, res) => {
+app.get('/api/content', requireShareRoot, (req, res) => {
   try {
     const rel = decodeRelPath(req.query.path);
     const abs = rel ? resolveExistingFile(rel) : null;
@@ -603,7 +722,7 @@ app.get('/api/content', (req, res) => {
 });
 
 // Save text file content
-app.put('/api/files/content', (req, res) => {
+app.put('/api/files/content', requireShareRoot, (req, res) => {
   try {
     const rel = decodeRelPath(req.body.path);
     const abs = rel ? resolveExistingFile(rel) : null;
@@ -634,7 +753,7 @@ app.put('/api/files/content', (req, res) => {
 });
 
 // Create a new text file (lyrics sheet)
-app.post('/api/files/create', (req, res) => {
+app.post('/api/files/create', requireShareRoot, (req, res) => {
   try {
     const dirRel = req.body.dir != null ? String(req.body.dir) : '';
     const dirResolved = safeResolveDir(dirRel);
@@ -651,7 +770,7 @@ app.post('/api/files/create', (req, res) => {
     }
 
     const abs = path.join(dirResolved.full, filename);
-    const root = path.resolve(SHARE_DIR);
+    const root = path.resolve(getShareRoot());
     const resolvedAbs = path.resolve(abs);
     if (resolvedAbs !== root && !resolvedAbs.startsWith(root + path.sep)) {
       return res.status(400).json({ error: 'Invalid path' });
@@ -688,7 +807,7 @@ app.post('/api/files/create', (req, res) => {
 });
 
 // Rename file on disk + update DB path key
-app.put('/api/files/rename', (req, res) => {
+app.put('/api/files/rename', requireShareRoot, (req, res) => {
   try {
     const rel = decodeRelPath(req.body.path);
     const abs = rel ? resolveExistingFile(rel) : null;
@@ -726,7 +845,7 @@ app.put('/api/files/rename', (req, res) => {
 });
 
 // Preview (no download count)
-app.get('/api/preview', (req, res) => {
+app.get('/api/preview', requireShareRoot, (req, res) => {
   const rel = decodeRelPath(req.query.path);
   const abs = rel ? resolveExistingFile(rel) : null;
   if (!abs) return res.status(404).json({ error: 'File not found' });
@@ -734,7 +853,7 @@ app.get('/api/preview', (req, res) => {
 });
 
 // Download (increments count)
-app.get('/api/download', (req, res) => {
+app.get('/api/download', requireShareRoot, (req, res) => {
   const rel = decodeRelPath(req.query.path);
   const abs = rel ? resolveExistingFile(rel) : null;
   if (!abs) return res.status(404).json({ error: 'File not found' });
@@ -743,7 +862,7 @@ app.get('/api/download', (req, res) => {
 });
 
 // Upload — optional ?dir=relative/subfolder
-app.post('/api/upload', upload.array('files'), (req, res) => {
+app.post('/api/upload', requireShareRoot, upload.array('files'), (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files received' });
   }
@@ -769,7 +888,7 @@ app.post('/api/upload', upload.array('files'), (req, res) => {
 });
 
 // Delete file on disk + soft-delete in DB
-app.delete('/api/files', (req, res) => {
+app.delete('/api/files', requireShareRoot, (req, res) => {
   const rel = decodeRelPath(req.query.path);
   const abs = rel ? resolveExistingFile(rel) : null;
   if (!abs) return res.status(404).json({ error: 'File not found' });
@@ -779,7 +898,7 @@ app.delete('/api/files', (req, res) => {
 });
 
 // Toggle a tag on a file (max 2 tags), or clear all when tag_id is null
-app.put('/api/files/tag', (req, res) => {
+app.put('/api/files/tag', requireShareRoot, (req, res) => {
   try {
     const rel = decodeRelPath(req.body.path);
     const abs = rel ? resolveExistingFile(rel) : null;
@@ -819,7 +938,7 @@ app.put('/api/files/tag', (req, res) => {
 
 app.get('/api/settings', (_req, res) => {
   try {
-    res.json(getCategorySettings());
+    res.json(getAppSettings());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -827,11 +946,11 @@ app.get('/api/settings', (_req, res) => {
 
 app.put('/api/settings', (req, res) => {
   try {
-    const settings = saveCategorySettings(
+    saveCategorySettings(
       req.body.excludeTags,
       req.body.showTags,
     );
-    res.json(settings);
+    res.json(getAppSettings());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -910,7 +1029,12 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`\nFileshare server running`);
   console.log(`  Local:   http://localhost:${PORT}`);
   addresses.forEach((ip) => console.log(`  Network: http://${ip}:${PORT}`));
-  console.log(`\nStoring files in: ${SHARE_DIR}`);
+  const shareDir = getShareRoot();
+  if (shareDir) {
+    console.log(`\nStoring files in: ${shareDir}`);
+  } else {
+    console.log('\nStorage folder not configured — open the app in a browser to finish setup');
+  }
   console.log(`  Database: ${DB_PATH}`);
   console.log('Press Ctrl+C to stop\n');
 });
