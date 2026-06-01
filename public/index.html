@@ -40,8 +40,9 @@
       margin-left: auto;
       display: flex;
       align-items: center;
+      justify-content: flex-end;
       gap: 10px;
-      flex-wrap: wrap;
+      min-width: 0;
     }
     .header-restart-btn {
       display: inline-flex;
@@ -77,9 +78,11 @@
       font-size: 0.8rem;
       color: #555;
       white-space: nowrap;
-      max-width: min(100vw - 48px, 420px);
+      max-width: min(280px, 34vw);
       overflow: hidden;
       text-overflow: ellipsis;
+      min-width: 0;
+      flex: 0 1 auto;
     }
 
     .card {
@@ -1428,7 +1431,7 @@
       </svg>
       <span>Restart server</span>
     </button>
-    <span class="header-path" id="header-path" title="">Not configured</span>
+    <span class="header-path" id="header-path" title=""></span>
   </div>
 </header>
 
@@ -1619,7 +1622,7 @@
     <section class="settings-section">
       <h4>Storage folder</h4>
       <p class="settings-section-desc">Uploaded files are stored on this PC at the path below.</p>
-      <code id="settings-share-dir" class="settings-share-path">Not configured</code>
+      <code id="settings-share-dir" class="settings-share-path"></code>
       <button type="button" class="btn-secondary btn-sm settings-danger-btn" id="change-storage-btn">Change storage folder…</button>
     </section>
     <section class="settings-section">
@@ -1961,22 +1964,50 @@
     if (!settings) return;
     state.excludeTags = settings.excludeTags || [];
     state.showTags = settings.showTags || [];
-    if (settings.shareDir) {
-      state.shareDir = settings.shareDir;
-      updateHeaderPath(settings.shareDir);
-      updateSettingsShareDir(settings.shareDir);
-    }
+    if (settings.shareDir) syncSharePath(settings.shareDir);
   }
 
-  function updateHeaderPath(shareDir) {
+  function syncSharePath(shareDir) {
+    if (!shareDir) return;
+    state.shareDir = shareDir;
     const el = document.getElementById('header-path');
-    if (!el) return;
-    if (shareDir) {
+    if (el) {
       el.textContent = shareDir;
       el.title = shareDir;
-    } else {
+    }
+    updateSettingsShareDir(shareDir);
+  }
+
+  function markShareUnconfigured() {
+    state.shareDir = '';
+    const el = document.getElementById('header-path');
+    if (el) {
       el.textContent = 'Not configured';
       el.title = '';
+    }
+    updateSettingsShareDir('');
+  }
+
+  async function fetchSetupStatus() {
+    const res = await fetch('/api/setup', { cache: 'no-store' });
+    if (!res.ok) throw new Error('Setup check failed');
+    return res.json();
+  }
+
+  async function bootstrapApp() {
+    try {
+      const data = await fetchSetupStatus();
+      if (data.configured && data.shareDir) {
+        syncSharePath(data.shareDir);
+        hideSetupModal();
+        await maybeMigrateLocalSettings();
+        await loadFiles();
+        return;
+      }
+      markShareUnconfigured();
+      showSetupModal({ suggested: data.suggested || '' });
+    } catch {
+      showToast('Could not reach server', 'error');
     }
   }
 
@@ -2010,15 +2041,16 @@
 
   async function checkSetup() {
     try {
-      const res = await fetch('/api/setup');
-      const data = await res.json();
+      const data = await fetchSetupStatus();
       if (data.configured && data.shareDir) {
-        state.shareDir = data.shareDir;
-        updateHeaderPath(data.shareDir);
-        updateSettingsShareDir(data.shareDir);
+        syncSharePath(data.shareDir);
+        hideSetupModal();
         return true;
       }
-      showSetupModal({ suggested: data.suggested || '' });
+      if (!state.shareDir) {
+        markShareUnconfigured();
+        showSetupModal({ suggested: data.suggested || '' });
+      }
       return false;
     } catch {
       showToast('Could not reach server', 'error');
@@ -2049,9 +2081,7 @@
         return;
       }
       hideSetupModal();
-      state.shareDir = data.shareDir;
-      updateHeaderPath(data.shareDir);
-      updateSettingsShareDir(data.shareDir);
+      syncSharePath(data.shareDir);
       showToast(setupIsReset ? 'Storage folder updated' : 'Storage folder configured', 'success');
       setupIsReset = false;
       await loadFiles();
@@ -3498,16 +3528,13 @@
       if (res.status === 503) {
         const data = await res.json().catch(() => ({}));
         if (data.needsSetup) {
-          await checkSetup();
-          return;
+          const ok = await checkSetup();
+          if (ok) return loadFiles();
         }
+        return;
       }
       const data = await res.json();
-      if (data.shareDir) {
-        state.shareDir = data.shareDir;
-        updateHeaderPath(data.shareDir);
-        updateSettingsShareDir(data.shareDir);
-      }
+      if (data.shareDir) syncSharePath(data.shareDir);
       state.page = data.pagination.page;
       state.tags = data.tags;
       state.listMode = data.mode || 'browse';
@@ -3634,9 +3661,7 @@
       }
       closeResetStorageModal();
       closeSettingsModal();
-      state.shareDir = '';
-      updateHeaderPath('');
-      updateSettingsShareDir('');
+      markShareUnconfigured();
       showSetupModal({ isReset: true });
       const tbody = document.getElementById('file-list');
       tbody.replaceChildren();
@@ -3921,10 +3946,7 @@
 
   readUrlIntoState();
   initNewSheetExtSelect();
-  (async () => {
-    await maybeMigrateLocalSettings();
-    if (await checkSetup()) loadFiles();
-  })();
+  bootstrapApp();
   window.addEventListener('popstate', () => {
     readUrlIntoState();
     loadFiles();
