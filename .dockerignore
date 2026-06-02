@@ -8,6 +8,4 @@ fileshare.db-shm
 .DS_Store
 Thumbs.db
 data/
-public/.build-id
 public/index.monolith.html
-.cursor/

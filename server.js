@@ -7,8 +7,12 @@ const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 
 const app = express();
-const PORT = 3000;
-const DB_PATH = path.join(__dirname, 'fileshare.db');
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+const DB_PATH = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.join(__dirname, 'fileshare.db');
+const ENV_SHARE_DIR = process.env.SHARE_DIR ? path.resolve(process.env.SHARE_DIR) : null;
+const IS_DOCKER = process.env.DOCKER === '1' || process.env.DOCKER === 'true';
 const LEGACY_DEFAULT_SHARE = path.join('D:', 'Fileshare');
 
 // ── Path safety (all file ops stay under the configured share root) ───────────
@@ -67,6 +71,9 @@ function resolveExistingFile(rel) {
 
 // ── Database ─────────────────────────────────────────────────────────────────
 
+const dbDir = path.dirname(DB_PATH);
+fs.mkdirSync(dbDir, { recursive: true });
+
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
@@ -108,6 +115,57 @@ db.prepare(`
   CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT '[]'
+  )
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS songs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  )
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS song_assets (
+    song_id    INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    file_path  TEXT    NOT NULL,
+    role       TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (song_id, file_path)
+  )
+`).run();
+
+try {
+  db.prepare('SELECT notes FROM songs LIMIT 1').get();
+} catch {
+  db.prepare(`ALTER TABLE songs ADD COLUMN notes TEXT NOT NULL DEFAULT ''`).run();
+}
+
+try {
+  db.prepare('SELECT notes FROM song_assets LIMIT 1').get();
+} catch {
+  db.prepare(`ALTER TABLE song_assets ADD COLUMN notes TEXT NOT NULL DEFAULT ''`).run();
+}
+try {
+  db.prepare('SELECT track_labels FROM song_assets LIMIT 1').get();
+} catch {
+  db.prepare(`ALTER TABLE song_assets ADD COLUMN track_labels TEXT NOT NULL DEFAULT '[]'`).run();
+}
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS song_tags (
+    song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (song_id, tag_id)
+  )
+`).run();
+
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS folder_tags (
+    folder_path TEXT    NOT NULL,
+    tag_id      INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (folder_path, tag_id)
   )
 `).run();
 
@@ -155,11 +213,81 @@ const stmts = {
     INSERT INTO app_settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `),
+  getAllSongs: db.prepare(`
+    SELECT s.id, s.name, s.created_at, COUNT(sa.file_path) AS asset_count
+    FROM songs s
+    LEFT JOIN song_assets sa ON sa.song_id = s.id
+    GROUP BY s.id
+    ORDER BY s.name COLLATE NOCASE
+  `),
+  getSong: db.prepare('SELECT * FROM songs WHERE id = ?'),
+  createSong: db.prepare('INSERT INTO songs (name) VALUES (?)'),
+  renameSong: db.prepare('UPDATE songs SET name = ? WHERE id = ?'),
+  updateSongNotes: db.prepare('UPDATE songs SET notes = ? WHERE id = ?'),
+  deleteSong: db.prepare('DELETE FROM songs WHERE id = ?'),
+  getSongTags: db.prepare(`
+    SELECT t.id, t.name FROM song_tags st
+    JOIN tags t ON t.id = st.tag_id
+    WHERE st.song_id = ?
+    ORDER BY t.name
+  `),
+  getSongTagIds: db.prepare('SELECT tag_id FROM song_tags WHERE song_id = ?'),
+  addSongTag: db.prepare('INSERT OR IGNORE INTO song_tags (song_id, tag_id) VALUES (?, ?)'),
+  removeSongTag: db.prepare('DELETE FROM song_tags WHERE song_id = ? AND tag_id = ?'),
+  clearSongTags: db.prepare('DELETE FROM song_tags WHERE song_id = ?'),
+  getMaxSongAssetSort: db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS max FROM song_assets WHERE song_id = ?'),
+  updateSongAssetRole: db.prepare('UPDATE song_assets SET role = ? WHERE song_id = ? AND file_path = ?'),
+  updateSongAssetNotes: db.prepare('UPDATE song_assets SET notes = ? WHERE song_id = ? AND file_path = ?'),
+  updateSongAssetTrackLabels: db.prepare('UPDATE song_assets SET track_labels = ? WHERE song_id = ? AND file_path = ?'),
+  updateSongAssetSort: db.prepare('UPDATE song_assets SET sort_order = ? WHERE song_id = ? AND file_path = ?'),
+  getSongAssets: db.prepare(`
+    SELECT file_path, role, sort_order, notes, track_labels FROM song_assets
+    WHERE song_id = ? ORDER BY sort_order, file_path
+  `),
+  getSongForFile: db.prepare(`
+    SELECT s.id, s.name FROM songs s
+    JOIN song_assets sa ON sa.song_id = s.id
+    WHERE sa.file_path = ?
+  `),
+  getSongSiblings: db.prepare(`
+    SELECT sa.file_path, sa.role, sa.sort_order FROM song_assets sa
+    WHERE sa.song_id = (SELECT song_id FROM song_assets WHERE file_path = ?)
+    ORDER BY sa.sort_order, sa.file_path
+  `),
+  addSongAsset: db.prepare(`
+    INSERT INTO song_assets (song_id, file_path, role, sort_order)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(song_id, file_path) DO UPDATE SET role = excluded.role, sort_order = excluded.sort_order
+  `),
+  removeSongAsset: db.prepare('DELETE FROM song_assets WHERE song_id = ? AND file_path = ?'),
+  removeSongAssetByPath: db.prepare('DELETE FROM song_assets WHERE file_path = ?'),
+  renameSongAssetPath: db.prepare('UPDATE song_assets SET file_path = ? WHERE file_path = ?'),
+  getAllFolderTags: db.prepare(`
+    SELECT ft.folder_path, t.id, t.name
+    FROM folder_tags ft
+    JOIN tags t ON t.id = ft.tag_id
+    ORDER BY ft.folder_path, t.name
+  `),
+  getFolderTagIds: db.prepare('SELECT tag_id FROM folder_tags WHERE folder_path = ?'),
+  addFolderTag: db.prepare('INSERT OR IGNORE INTO folder_tags (folder_path, tag_id) VALUES (?, ?)'),
+  removeFolderTag: db.prepare('DELETE FROM folder_tags WHERE folder_path = ? AND tag_id = ?'),
+  clearFolderTags: db.prepare('DELETE FROM folder_tags WHERE folder_path = ?'),
+  countFolderTags: db.prepare('SELECT COUNT(*) AS n FROM folder_tags WHERE folder_path = ?'),
 };
 
 let cachedShareRoot = undefined;
 
 function bootstrapShareDir() {
+  if (ENV_SHARE_DIR) {
+    try {
+      fs.mkdirSync(ENV_SHARE_DIR, { recursive: true });
+      if (fs.statSync(ENV_SHARE_DIR).isDirectory()) {
+        stmts.setSetting.run('share_dir', ENV_SHARE_DIR);
+        cachedShareRoot = ENV_SHARE_DIR;
+        return cachedShareRoot;
+      }
+    } catch { /* fall through to DB / legacy */ }
+  }
   const row = stmts.getSetting.get('share_dir');
   if (row !== undefined) {
     if (!row.value) {
@@ -258,11 +386,49 @@ function uniqueFilename(dirFull, name) {
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
+function stampBuildId() {
+  const buildIdPath = path.join(__dirname, 'public', '.build-id');
+  const id = String(Date.now());
+  fs.writeFileSync(buildIdPath, id + '\n');
+  return id;
+}
+
+function getBuildId() {
+  const buildIdPath = path.join(__dirname, 'public', '.build-id');
+  try {
+    const id = fs.readFileSync(buildIdPath, 'utf8').trim();
+    if (id) return id;
+  } catch { /* create below */ }
+  return stampBuildId();
+}
+
+stampBuildId();
+
 app.use(express.json());
 app.get('/vendor/marked.min.js', (_req, res) => {
   res.sendFile(path.join(__dirname, 'node_modules', 'marked', 'marked.min.js'));
 });
-app.use(express.static(path.join(__dirname, 'public')));
+
+app.use((req, res, next) => {
+  if (req.path.endsWith('.js') || req.path.endsWith('.css')) {
+    const buildId = getBuildId();
+    if (req.query.v && req.query.v === buildId) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  }
+  next();
+});
+
+app.get('/', (_req, res) => {
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8')
+    .replace(/__BUILD_ID__/g, getBuildId());
+  res.setHeader('Cache-Control', 'no-cache');
+  res.type('html').send(html);
+});
+
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
@@ -293,8 +459,8 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const EDITABLE_EXTENSIONS = new Set(['.txt', '.md', '.pro', '.cho']);
-const CREATABLE_SHEET_EXTENSIONS = new Set(['.txt', '.md']);
-const SHEET_VIEW_EXTENSIONS = new Set(['.txt', '.md']);
+const CREATABLE_SHEET_EXTENSIONS = new Set(['.txt', '.md', '.pro', '.cho']);
+const SHEET_VIEW_EXTENSIONS = new Set(['.txt', '.md', '.pro', '.cho']);
 
 function fileExtension(name) {
   const i = name.lastIndexOf('.');
@@ -355,6 +521,31 @@ function loadTagsByFilename() {
   return map;
 }
 
+function loadTagsByFolder() {
+  const map = {};
+  for (const row of stmts.getAllFolderTags.all()) {
+    if (!map[row.folder_path]) map[row.folder_path] = [];
+    map[row.folder_path].push({ id: row.id, name: row.name });
+  }
+  return map;
+}
+
+function fileInheritsFolderTag(relPath, filterId, tagsByFolder) {
+  if (isNaN(filterId)) return false;
+  const parts = relPath.split('/');
+  if (parts.length <= 1) {
+    return (tagsByFolder[''] || []).some((t) => t.id === filterId);
+  }
+  parts.pop();
+  let acc = '';
+  for (const seg of parts) {
+    acc = acc ? path.posix.join(acc, seg) : seg;
+    const tags = tagsByFolder[acc];
+    if (tags && tags.some((t) => t.id === filterId)) return true;
+  }
+  return false;
+}
+
 function buildFileRecords(fsFiles, dbMap, tagsByFile) {
   return fsFiles.map((f) => {
     const rec = dbMap[f.relPath];
@@ -373,11 +564,18 @@ function buildFileRecords(fsFiles, dbMap, tagsByFile) {
   });
 }
 
-function applyTagFilter(files, tagFilter) {
-  if (tagFilter === 'untagged') return files.filter((f) => !f.tags.length);
+function applyTagFilter(files, tagFilter, tagsByFolder) {
+  if (tagFilter === 'untagged') {
+    return files.filter((f) => !f.tags.length);
+  }
   if (tagFilter !== 'all') {
     const filterId = parseInt(tagFilter, 10);
-    if (!isNaN(filterId)) return files.filter((f) => f.tags.some((t) => t.id === filterId));
+    if (!isNaN(filterId)) {
+      return files.filter(
+        (f) => f.tags.some((t) => t.id === filterId)
+          || fileInheritsFolderTag(f.relPath, filterId, tagsByFolder || {}),
+      );
+    }
   }
   return files;
 }
@@ -541,7 +739,7 @@ function paginateItems(items, page, pageSize) {
   };
 }
 
-function buildBrowseItems(dirResolved, dbMap, tagsByFile) {
+function buildBrowseItems(dirResolved, dbMap, tagsByFile, tagsByFolder) {
   const entries = fs.readdirSync(dirResolved.full, { withFileTypes: true });
   const items = [];
 
@@ -559,7 +757,7 @@ function buildBrowseItems(dirResolved, dbMap, tagsByFile) {
         relPath,
         size: getFolderSize(relPath, subAbs),
         modified: mtime,
-        tags: [],
+        tags: tagsByFolder[relPath] || [],
         downloadCount: null,
       });
     } else if (e.isFile()) {
@@ -595,7 +793,8 @@ app.get('/api/setup', (_req, res) => {
     res.json({
       configured: !!shareDir,
       shareDir: shareDir || '',
-      suggested: LEGACY_DEFAULT_SHARE,
+      suggested: ENV_SHARE_DIR || LEGACY_DEFAULT_SHARE,
+      docker: IS_DOCKER,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -631,12 +830,18 @@ app.post('/api/setup/reset', (req, res) => {
 
 // ── File endpoints ────────────────────────────────────────────────────────────
 
+function parseListView(raw) {
+  if (raw === 'documents' || raw === 'sheets') return 'documents';
+  if (raw === 'songs' || raw === 'library') return raw;
+  return 'browse';
+}
+
 // List folder contents — unified items with search, sort, pagination
 app.get('/api/files', requireShareRoot, (req, res) => {
   try {
     const { page, pageSize, query, sort, order } = parseListParams(req);
     const tagFilter = req.query.tag || 'all';
-    const view = req.query.view === 'sheets' ? 'sheets' : 'browse';
+    const view = parseListView(req.query.view);
 
     const dbMap = {};
     for (const row of stmts.getAllActiveFiles.all()) {
@@ -645,14 +850,41 @@ app.get('/api/files', requireShareRoot, (req, res) => {
 
     const tags = stmts.getAllTags.all();
     const tagsByFile = loadTagsByFilename();
+    const tagsByFolder = loadTagsByFolder();
     const settings = getAppSettings();
     const shareDir = getShareRoot();
 
-    // Flat cross-folder list for tag filters or the Sheets view
-    if (tagFilter !== 'all' || view === 'sheets') {
+    // Songs view — flat list of song groups
+    if (view === 'songs' && tagFilter === 'all') {
+      const songList = stmts.getAllSongs.all();
+      let items = songList.map((s) => ({
+        kind: 'song',
+        id: s.id,
+        name: s.name,
+        relPath: '',
+        size: null,
+        modified: s.created_at,
+        tags: stmts.getSongTags.all(s.id).map((t) => ({ id: t.id, name: t.name })),
+        downloadCount: null,
+        assetCount: s.asset_count,
+      }));
+      items = filterByQuery(items, query);
+      const result = listResponse(items, page, pageSize, sort, order, {
+        mode: 'songs',
+        dir: '',
+        breadcrumbs: [{ name: 'Home', path: '', clearFilter: true }],
+        tags,
+        settings,
+        shareDir,
+      });
+      return res.json(result);
+    }
+
+    // Flat cross-folder list for tag filters, Documents view, or library search
+    if (tagFilter !== 'all' || view === 'documents' || view === 'library') {
       const allFsFiles = walkAllFiles('', shareDir);
       let items = buildFileRecords(allFsFiles, dbMap, tagsByFile);
-      if (view === 'sheets') {
+      if (view === 'documents') {
         items = items.filter((f) => isSheetFile(f.name));
         items = applyCategoryExclusions(
           items,
@@ -660,9 +892,9 @@ app.get('/api/files', requireShareRoot, (req, res) => {
           settings.showTags,
         );
       }
-      items = applyTagFilter(items, tagFilter);
+      items = applyTagFilter(items, tagFilter, tagsByFolder);
       items = filterByQuery(items, query);
-      const mode = view === 'sheets' ? 'sheets' : 'flat';
+      const mode = view === 'documents' ? 'documents' : view === 'library' ? 'library' : 'flat';
       const result = listResponse(items, page, pageSize, sort, order, {
         mode,
         filterLabel: tagFilter !== 'all' ? filterLabelFor(tagFilter, tags) : null,
@@ -680,7 +912,7 @@ app.get('/api/files', requireShareRoot, (req, res) => {
       return res.status(400).json({ error: 'Invalid folder path' });
     }
 
-    let items = buildBrowseItems(dirResolved, dbMap, tagsByFile);
+    let items = buildBrowseItems(dirResolved, dbMap, tagsByFile, tagsByFolder);
     items = filterByQuery(items, query);
     items = applyCategoryExclusions(
       items,
@@ -785,7 +1017,7 @@ app.post('/api/files/create', requireShareRoot, (req, res) => {
 
     const ext = fileExtension(filename);
     if (!CREATABLE_SHEET_EXTENSIONS.has(ext)) {
-      return res.status(400).json({ error: 'Only .txt and .md files can be created' });
+      return res.status(400).json({ error: 'Only .txt, .md, .pro, and .cho files can be created' });
     }
 
     const abs = path.join(dirResolved.full, filename);
@@ -857,9 +1089,48 @@ app.put('/api/files/rename', requireShareRoot, (req, res) => {
     if (record && !record.deleted) {
       stmts.renameFile.run(newRel, rel);
     }
+    stmts.renameSongAssetPath.run(newRel, rel);
 
     const stat = fs.statSync(newAbs);
     res.json({ path: newRel, name: newName, modified: stat.mtime.toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Move file to another folder on disk + update DB path key
+app.put('/api/files/move', requireShareRoot, (req, res) => {
+  try {
+    const rel = decodeRelPath(req.body.path);
+    const abs = rel ? resolveExistingFile(rel) : null;
+    if (!abs) return res.status(404).json({ error: 'File not found' });
+
+    const dirRel = req.body.dir != null ? String(req.body.dir) : '';
+    const dirResolved = safeResolveDir(dirRel);
+    if (!dirResolved) return res.status(400).json({ error: 'Invalid folder path' });
+
+    const segments = rel.split('/');
+    const oldName = segments.pop();
+    const oldDirRel = segments.join('/');
+    if (oldDirRel === dirResolved.relative) {
+      const stat = fs.statSync(abs);
+      return res.json({ path: rel, name: oldName, modified: stat.mtime.toISOString(), moved: false });
+    }
+
+    fs.mkdirSync(dirResolved.full, { recursive: true });
+    const destName = uniqueFilename(dirResolved.full, oldName);
+    const newAbs = path.join(dirResolved.full, destName);
+    fs.renameSync(abs, newAbs);
+    const newRel = posixRel(dirResolved.relative, destName);
+
+    const record = stmts.getFile.get(rel);
+    if (record && !record.deleted) {
+      stmts.renameFile.run(newRel, rel);
+    }
+    stmts.renameSongAssetPath.run(newRel, rel);
+
+    const stat = fs.statSync(newAbs);
+    res.json({ path: newRel, name: destName, modified: stat.mtime.toISOString(), moved: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -915,6 +1186,7 @@ app.delete('/api/files', requireShareRoot, (req, res) => {
   if (!abs) return res.status(404).json({ error: 'File not found' });
   fs.unlinkSync(abs);
   stmts.softDelete.run(rel);
+  stmts.removeSongAssetByPath.run(rel);
   res.json({ deleted: rel });
 });
 
@@ -1008,8 +1280,328 @@ app.delete('/api/tags/:id', (req, res) => {
   res.json({ deleted: id });
 });
 
+// ── Folder tag endpoints ────────────────────────────────────────────────────────
+
+app.put('/api/folders/tag', requireShareRoot, (req, res) => {
+  try {
+    const folderPath = decodeRelPath(req.body.path);
+    if (folderPath == null) return res.status(400).json({ error: 'Invalid folder path' });
+    const dirResolved = safeResolveDir(folderPath);
+    if (!dirResolved) return res.status(400).json({ error: 'Invalid folder path' });
+
+    const rel = dirResolved.relative;
+
+    if (req.body.tag_id === null) {
+      stmts.clearFolderTags.run(rel);
+      return res.json({ ok: true, tags: [] });
+    }
+
+    const tagId = parseInt(req.body.tag_id, 10);
+    if (isNaN(tagId) || !stmts.getTagById.get(tagId)) {
+      return res.status(400).json({ error: 'Invalid tag' });
+    }
+
+    const assigned = stmts.getFolderTagIds.all(rel).map((r) => r.tag_id);
+    if (assigned.includes(tagId)) {
+      stmts.removeFolderTag.run(rel, tagId);
+    } else {
+      if (assigned.length >= MAX_TAGS_PER_FILE) {
+        return res.status(400).json({ error: `Maximum ${MAX_TAGS_PER_FILE} tags per folder` });
+      }
+      stmts.addFolderTag.run(rel, tagId);
+    }
+
+    const tags = stmts.getAllFolderTags.all()
+      .filter((row) => row.folder_path === rel)
+      .map((row) => ({ id: row.id, name: row.name }));
+    res.json({ ok: true, tags });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Song group endpoints ────────────────────────────────────────────────────────
+
+function songPayload(song) {
+  return {
+    id: song.id,
+    name: song.name,
+    notes: song.notes || '',
+    created_at: song.created_at,
+    tags: stmts.getSongTags.all(song.id).map((t) => ({ id: t.id, name: t.name })),
+  };
+}
+
+function parseTrackLabels(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((l) => typeof l === 'string' && l.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function enrichSongAssets(rows) {
+  return rows.map((row) => {
+    const abs = resolveExistingFile(row.file_path);
+    let name = path.basename(row.file_path);
+    let modified = null;
+    let size = null;
+    if (abs) {
+      try {
+        const st = fs.statSync(abs);
+        modified = st.mtime.toISOString();
+        size = st.size;
+      } catch { /* missing file */ }
+    }
+    return {
+      path: row.file_path,
+      name,
+      role: row.role || '',
+      notes: row.notes || '',
+      trackLabels: parseTrackLabels(row.track_labels),
+      sortOrder: row.sort_order,
+      modified,
+      size,
+    };
+  });
+}
+
+app.get('/api/songs', (_req, res) => {
+  try {
+    res.json(stmts.getAllSongs.all());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/songs', (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Song name required' });
+    const info = stmts.createSong.run(name);
+    res.json({
+      id: info.lastInsertRowid,
+      name,
+      created_at: new Date().toISOString(),
+      asset_count: 0,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/songs/by-file', requireShareRoot, (req, res) => {
+  try {
+    const rel = decodeRelPath(req.query.path);
+    if (!rel) return res.json({ song: null, assets: [] });
+    const song = stmts.getSongForFile.get(rel);
+    if (!song) return res.json({ song: null, assets: [] });
+    const assets = enrichSongAssets(stmts.getSongAssets.all(song.id));
+    res.json({ song: { id: song.id, name: song.name }, assets });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/songs/:id', requireShareRoot, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const song = stmts.getSong.get(id);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+    const assets = enrichSongAssets(stmts.getSongAssets.all(id));
+    res.json({ ...songPayload(song), assets });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/songs/tag', (req, res) => {
+  try {
+    const songId = parseInt(req.body.song_id, 10);
+    const song = stmts.getSong.get(songId);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+
+    if (req.body.tag_id === null) {
+      stmts.clearSongTags.run(songId);
+      return res.json({ ok: true, tags: [] });
+    }
+
+    const tagId = parseInt(req.body.tag_id, 10);
+    if (isNaN(tagId) || !stmts.getTagById.get(tagId)) {
+      return res.status(400).json({ error: 'Invalid tag' });
+    }
+
+    const assigned = stmts.getSongTagIds.all(songId).map((r) => r.tag_id);
+    if (assigned.includes(tagId)) {
+      stmts.removeSongTag.run(songId, tagId);
+    } else {
+      if (assigned.length >= MAX_TAGS_PER_FILE) {
+        return res.status(400).json({ error: `Maximum ${MAX_TAGS_PER_FILE} tags per song` });
+      }
+      stmts.addSongTag.run(songId, tagId);
+    }
+
+    const tags = stmts.getSongTags.all(songId).map((t) => ({ id: t.id, name: t.name }));
+    res.json({ ok: true, tags });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/songs/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const song = stmts.getSong.get(id);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+    const hasName = req.body.name != null;
+    const hasNotes = req.body.notes != null;
+    if (!hasName && !hasNotes) {
+      return res.status(400).json({ error: 'Nothing to update' });
+    }
+    if (hasName) {
+      const name = String(req.body.name).trim();
+      if (!name) return res.status(400).json({ error: 'Song name required' });
+      stmts.renameSong.run(name, id);
+    }
+    if (hasNotes) {
+      stmts.updateSongNotes.run(String(req.body.notes), id);
+    }
+    const updated = stmts.getSong.get(id);
+    res.json(songPayload(updated));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/songs/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const song = stmts.getSong.get(id);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+    stmts.deleteSong.run(id);
+    res.json({ deleted: id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/songs/:id/assets', requireShareRoot, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const song = stmts.getSong.get(id);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+
+    const rel = decodeRelPath(req.body.path);
+    const abs = rel ? resolveExistingFile(rel) : null;
+    if (!abs) return res.status(404).json({ error: 'File not found' });
+
+    const existing = stmts.getSongForFile.get(rel);
+    if (existing && existing.id !== id) {
+      stmts.removeSongAsset.run(existing.id, rel);
+    }
+
+    const role = req.body.role != null ? String(req.body.role).slice(0, 32) : null;
+    const maxSort = stmts.getMaxSongAssetSort.get(id).max;
+    const sortOrder = req.body.sortOrder != null
+      ? parseInt(req.body.sortOrder, 10) || 0
+      : maxSort + 1;
+    stmts.addSongAsset.run(id, rel, role, sortOrder);
+    const assets = enrichSongAssets(stmts.getSongAssets.all(id));
+    res.json({ ok: true, assets });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/songs/:id/assets', requireShareRoot, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const song = stmts.getSong.get(id);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+
+    const rel = decodeRelPath(req.body.path);
+    if (!rel) return res.status(400).json({ error: 'Path required' });
+
+    const row = stmts.getSongAssets.all(id).find((a) => a.file_path === rel);
+    if (!row) return res.status(404).json({ error: 'Asset not in song' });
+
+    if (req.body.role !== undefined) {
+      const role = req.body.role == null || req.body.role === ''
+        ? null
+        : String(req.body.role).slice(0, 32);
+      stmts.updateSongAssetRole.run(role, id, rel);
+    }
+    if (req.body.notes !== undefined) {
+      stmts.updateSongAssetNotes.run(String(req.body.notes).slice(0, 8000), id, rel);
+    }
+    if (req.body.trackLabels !== undefined) {
+      const labels = Array.isArray(req.body.trackLabels)
+        ? req.body.trackLabels.map((l) => String(l).trim().slice(0, 32)).filter(Boolean).slice(0, 5)
+        : [];
+      stmts.updateSongAssetTrackLabels.run(JSON.stringify(labels), id, rel);
+    }
+    if (req.body.sortOrder !== undefined) {
+      const sortOrder = parseInt(req.body.sortOrder, 10) || 0;
+      stmts.updateSongAssetSort.run(sortOrder, id, rel);
+    }
+
+    const assets = enrichSongAssets(stmts.getSongAssets.all(id));
+    res.json({ ok: true, assets });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/songs/:id/assets/reorder', requireShareRoot, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const song = stmts.getSong.get(id);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+
+    const order = req.body.order;
+    if (!Array.isArray(order) || !order.length) {
+      return res.status(400).json({ error: 'order array required' });
+    }
+
+    const existing = new Set(stmts.getSongAssets.all(id).map((a) => a.file_path));
+    const paths = order.map((p) => decodeRelPath(p)).filter((p) => p && existing.has(p));
+    if (!paths.length) return res.status(400).json({ error: 'No valid paths' });
+
+    const reorder = db.transaction((songId, orderedPaths) => {
+      orderedPaths.forEach((filePath, idx) => {
+        stmts.updateSongAssetSort.run(idx, songId, filePath);
+      });
+    });
+    reorder(id, paths);
+
+    const assets = enrichSongAssets(stmts.getSongAssets.all(id));
+    res.json({ ok: true, assets });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/songs/:id/assets', requireShareRoot, (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const song = stmts.getSong.get(id);
+    if (!song) return res.status(404).json({ error: 'Song not found' });
+    const rel = decodeRelPath(req.query.path || req.body.path);
+    if (!rel) return res.status(400).json({ error: 'Path required' });
+    stmts.removeSongAsset.run(id, rel);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Self-restart (spawn a new Node process, then exit). LAN-only use; do not expose to the internet.
 app.post('/api/admin/restart', (req, res) => {
+  if (IS_DOCKER) {
+    return res.json({ ok: true, restarting: false, docker: true, message: 'Use docker compose restart' });
+  }
   res.json({ ok: true, restarting: true });
   setTimeout(() => {
     try {

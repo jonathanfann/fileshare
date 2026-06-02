@@ -1,0 +1,14 @@
+services:
+  fileshare:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      SHARE_DIR: /data/files
+      DB_PATH: /data/fileshare.db
+      DOCKER: "1"
+    volumes:
+      - ./data/files:/data/files
+      - ./data/db:/data/db
+    restart: unless-stopped

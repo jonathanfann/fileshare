@@ -4,7 +4,17 @@
   "description": "Local network file sharing server",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "stamp": "node scripts/stamp-build.js",
+    "lint": "eslint \"public/js/**/*.js\" server.js scripts/check.js scripts/verify.js scripts/stamp-build.js .cursor/hooks",
+    "check": "node scripts/check.js",
+    "prestart": "node scripts/stamp-build.js",
+    "start": "node server.js",
+    "dev": "node scripts/stamp-build.js && node server.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",

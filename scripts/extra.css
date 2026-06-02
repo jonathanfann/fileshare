@@ -1,0 +1,67 @@
+
+@media print {
+  body * { visibility: hidden; }
+  #viewer-modal, #viewer-modal * { visibility: visible; }
+  #viewer-modal {
+    position: fixed; inset: 0; display: flex !important;
+    background: #fff !important; padding: 0; margin: 0;
+  }
+  .viewer-toolbar, .viewer-meta, .viewer-song-bar, #viewer-close-btn,
+  #viewer-edit-btn, #viewer-save-btn, #viewer-cancel-edit-btn,
+  #viewer-download-btn, #viewer-pdf-btn, #viewer-add-song-btn, .viewer-tags { display: none !important; }
+  #viewer-panel { box-shadow: none; border: none; max-width: none; width: 100%; }
+  .viewer-body { overflow: visible; padding: 24px; }
+  .viewer-markdown, .viewer-chordpro { color: #111 !important; background: #fff !important; }
+  .viewer-markdown a { color: #06c !important; }
+}
+
+#name-input-modal { z-index: 220; }
+.name-input-row { display: flex; gap: 8px; align-items: stretch; margin-top: 12px; }
+.name-input-row input {
+  flex: 1; min-width: 0; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid #333; background: #111; color: #e8e8e8; font: inherit;
+}
+.name-input-row input:focus { outline: none; border-color: #4a9eff; }
+.name-input-row select {
+  padding: 10px 12px; border-radius: 8px; border: 1px solid #333;
+  background: #111; color: #e8e8e8; font: inherit;
+}
+#name-input-error { color: #ff7777; font-size: 0.8rem; margin-top: 8px; min-height: 1.2em; }
+
+.viewer-song-bar {
+  display: none; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 8px 16px; border-bottom: 1px solid #2a2a2a; background: #141414;
+}
+.viewer-song-bar.show { display: flex; }
+.viewer-song-label { font-size: 0.75rem; color: #888; margin-right: 4px; }
+.viewer-song-chip {
+  padding: 4px 10px; border-radius: 999px; border: 1px solid #333;
+  background: #1a1a1a; color: #ccc; font-size: 0.75rem; cursor: pointer; font-family: inherit;
+}
+.viewer-song-chip:hover { border-color: #4a9eff; color: #e8e8e8; }
+.viewer-song-chip.active { border-color: #4a9eff; background: #1a2a3a; color: #4a9eff; }
+.viewer-song-chip .role { opacity: 0.7; margin-left: 4px; }
+
+.viewer-chordpro { padding: 20px; line-height: 1.6; max-width: 720px; margin: 0 auto; }
+.viewer-chordpro .cp-title { font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }
+.viewer-chordpro .cp-artist { color: #888; margin-bottom: 16px; }
+.viewer-chordpro .cp-section { margin: 16px 0; }
+.viewer-chordpro .cp-section-label { font-size: 0.75rem; color: #888; text-transform: uppercase; margin-bottom: 6px; }
+.viewer-chordpro .cp-line { margin: 4px 0; font-family: 'Courier New', monospace; white-space: pre; }
+.viewer-chordpro .cp-chords { color: #4a9eff; min-height: 1.2em; }
+.viewer-chordpro .cp-lyrics { color: #e8e8e8; }
+
+.row-song .file-type-icon svg { color: #b04aff; }
+.song-asset-count { font-size: 0.75rem; color: #888; display: block; margin-top: 2px; }
+
+#add-song-modal { z-index: 218; }
+.add-song-list { max-height: 220px; overflow-y: auto; margin: 12px 0; }
+.add-song-option {
+  display: block; width: 100%; text-align: left; padding: 8px 12px;
+  border: 1px solid #2a2a2a; border-radius: 8px; background: #141414;
+  color: #e8e8e8; font: inherit; cursor: pointer; margin-bottom: 6px;
+}
+.add-song-option:hover { border-color: #4a9eff; }
+#add-song-error { color: #ff7777; font-size: 0.8rem; margin-top: 8px; min-height: 1.2em; }
+
+.viewer-chordpro .cp-chords, .viewer-chordpro .cp-lyrics { white-space: pre-wrap; }

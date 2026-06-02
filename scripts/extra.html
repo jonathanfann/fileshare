@@ -1,0 +1,42 @@
+
+<!-- Reusable name input -->
+<div id="name-input-modal" class="modal-overlay" style="display:none">
+  <div class="modal" id="name-input-modal-box">
+    <div class="modal-header">
+      <h3 id="name-input-title">Name</h3>
+      <button type="button" class="modal-close" id="close-name-input-modal" title="Close">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <p class="modal-desc" id="name-input-desc"></p>
+    <div class="name-input-row">
+      <input type="text" id="name-input-field" spellcheck="false" autocomplete="off" />
+      <select id="name-input-suffix" style="display:none" aria-label="Suffix"></select>
+    </div>
+    <div id="name-input-error"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn-secondary" id="name-input-cancel-btn">Cancel</button>
+      <button type="button" class="btn" id="name-input-confirm-btn">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add file to song -->
+<div id="add-song-modal" class="modal-overlay" style="display:none">
+  <div class="modal" id="add-song-modal-box">
+    <div class="modal-header">
+      <h3>Add to song</h3>
+      <button type="button" class="modal-close" id="close-add-song-modal" title="Close">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <p class="modal-desc">Choose a song group or create a new one.</p>
+    <div id="add-song-list" class="add-song-list"></div>
+    <button type="button" class="btn-secondary btn-sm" id="add-song-new-btn">+ New song…</button>
+    <div id="add-song-error"></div>
+  </div>
+</div>
