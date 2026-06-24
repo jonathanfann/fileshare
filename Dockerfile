@@ -9,14 +9,15 @@ RUN npm ci --omit=dev
 
 COPY server.js ./
 COPY public ./public
+COPY scripts/stamp-build.js ./scripts/stamp-build.js
 
 ENV PORT=3000
 ENV SHARE_DIR=/data/files
-ENV DB_PATH=/data/fileshare.db
+ENV DB_PATH=/data/db/fileshare.db
 ENV DOCKER=1
 
 EXPOSE 3000
 
 VOLUME ["/data/files", "/data/db"]
 
-CMD ["node", "server.js"]
+CMD ["sh", "-c", "node scripts/stamp-build.js && node server.js"]

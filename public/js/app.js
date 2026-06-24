@@ -4,32 +4,14 @@ import {
   parentDirFromPath, formatSize, formatDateFull, modifiedCell, tagColor, TYPE_COLORS, NEW_SHEET_EXTENSIONS,
 } from './util.js';
 import { showToast } from './ui/toast.js';
+import {
+  state, VALID_SORTS, SETUP_RESET_CONFIRM, EXCLUDE_TAGS_KEY, SHOW_TAGS_KEY,
+  loadWorkspaceFromStorage, persistWorkspace,
+} from './state.js';
+import { applyWorkspaceChrome, initWorkspaceSwitcher, applySongwritingEnabledFromSettings } from './ui/workspace.js';
+import { initUpload, uploadFilesForSong, triggerSongAudioUpload } from './ui/upload.js';
 
-// ── State ─────────────────────────────────────────────────────────────────────
-
-const state = {
-  page: 1,
-  tagFilter: 'all',
-  view: 'browse',
-  songDetailId: null,
-  songLayout: 'studio',
-  studioAssetPath: '',
-  tags: [],
-  currentDir: '',
-  listMode: 'browse',
-  inlineRename: null,
-  query: '',
-  sort: 'modified',
-  order: 'desc',
-  excludeTags: [],
-  showTags: [],
-  shareDir: '',
-};
-
-const VALID_SORTS = ['name', 'size', 'modified', 'downloads'];
-const SETUP_RESET_CONFIRM = 'fileshare';
-const EXCLUDE_TAGS_KEY = 'fileshare-exclude-tags';
-const SHOW_TAGS_KEY = 'fileshare-show-tags';
+// ── State (see state.js) ──────────────────────────────────────────────────────
 let settingsMigrated = false;
 let setupIsReset = false;
 
@@ -94,6 +76,17 @@ async function bootstrapApp() {
       syncSharePath(data.shareDir);
       hideSetupModal();
       await maybeMigrateLocalSettings();
+      if (state.appView === 'settings') {
+        try {
+          const sr = await fetch('/api/settings');
+          const settings = await sr.json();
+          applyCategorySettings(settings);
+          await applySongwritingEnabledFromSettings(settings, { saveSettings: saveCategorySettings });
+        } catch { /* ignore */ }
+        refreshSettingsPage();
+        applyWorkspaceChrome();
+        return;
+      }
       await loadFiles();
       return;
     }
@@ -185,7 +178,7 @@ async function submitSetup() {
   }
 }
 
-async function saveCategorySettings() {
+async function saveCategorySettings(patch = {}) {
   try {
     const r = await fetch('/api/settings', {
       method: 'PUT',
@@ -193,11 +186,15 @@ async function saveCategorySettings() {
       body: JSON.stringify({
         excludeTags: state.excludeTags,
         showTags: state.showTags,
+        songwritingEnabled: state.songwritingEnabled,
+        ...patch,
       }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || 'Failed to save settings');
     applyCategorySettings(data);
+    await applySongwritingEnabledFromSettings(data, { saveSettings: saveCategorySettings });
+    applyWorkspaceChrome();
   } catch (err) {
     showToast(err.message || 'Failed to save settings', 'error');
   }
@@ -232,6 +229,8 @@ function hrefForState(partial = {}) {
     currentDir: state.currentDir,
     tagFilter: state.tagFilter,
     view: state.view,
+    appView: state.appView,
+    workspace: state.workspace,
     songDetailId: state.songDetailId,
     songLayout: state.songLayout,
     studioAssetPath: state.studioAssetPath,
@@ -242,6 +241,12 @@ function hrefForState(partial = {}) {
     ...partial,
   };
   const q = new URLSearchParams();
+  if (s.appView === 'settings') {
+    q.set('view', 'settings');
+    const qs = q.toString();
+    return location.pathname + (qs ? '?' + qs : '');
+  }
+  if (s.workspace === 'songwriting') q.set('workspace', 'songwriting');
   if (s.currentDir) q.set('dir', s.currentDir);
   if (s.tagFilter !== 'all') q.set('tag', String(s.tagFilter));
   if (s.view === 'documents') q.set('view', 'documents');
@@ -267,6 +272,11 @@ function readUrlIntoState() {
   const t = q.get('tag');
   state.tagFilter = t != null && t !== '' ? t : 'all';
   const viewParam = q.get('view');
+  if (viewParam === 'settings') {
+    state.appView = 'settings';
+    return;
+  }
+  state.appView = 'main';
   state.view = (viewParam === 'documents' || viewParam === 'sheets') ? 'documents'
     : viewParam === 'songs' ? 'songs' : 'browse';
   const songId = parseInt(q.get('song'), 10);
@@ -280,6 +290,12 @@ function readUrlIntoState() {
   const sort = q.get('sort');
   state.sort = VALID_SORTS.includes(sort) ? sort : 'modified';
   state.order = q.get('order') === 'asc' ? 'asc' : 'desc';
+  const ws = q.get('workspace');
+  if (ws === 'songwriting' || ws === 'files') state.workspace = ws;
+  else if (!location.search) state.workspace = loadWorkspaceFromStorage();
+  if (state.workspace === 'songwriting' && !state.songDetailId && state.view !== 'songs') {
+    state.view = 'songs';
+  }
 }
 
 function pushAppHistory() {
@@ -331,8 +347,98 @@ function renderBreadcrumbs(items, hideNav) {
   }
 }
 
+function openSongAddSheet() {
+  const sheet = document.getElementById('songwriting-add-sheet');
+  if (sheet) sheet.style.display = 'flex';
+}
+
+function closeSongAddSheet() {
+  const sheet = document.getElementById('songwriting-add-sheet');
+  if (sheet) sheet.style.display = 'none';
+}
+
+async function goBackToSongsList() {
+  if (!(await confirmStudioUnsaved())) return;
+  state.songDetailId = null;
+  state.songLayout = 'studio';
+  state.studioAssetPath = '';
+  state.query = '';
+  listSearchEl.value = '';
+  studioState.editing = false;
+  studioState.dirty = false;
+  updateListSearchPlaceholder();
+  pushAppHistory();
+  loadFiles();
+}
+
+function renderSongContextHeader(song) {
+  const banner = document.getElementById('flat-filter-banner');
+  banner.style.display = 'block';
+  banner.replaceChildren();
+
+  const row = el('div', { class: 'song-context-row' });
+  const crumbs = el('nav', { class: 'song-breadcrumb', 'aria-label': 'Song navigation' });
+
+  const songsLink = el('a', { href: '#', class: 'song-breadcrumb-link' });
+  songsLink.textContent = 'Songs';
+  songsLink.addEventListener('click', async (e) => {
+    e.preventDefault();
+    await goBackToSongsList();
+  });
+  crumbs.appendChild(songsLink);
+
+  if (song) {
+    crumbs.appendChild(append(el('span', { class: 'song-breadcrumb-sep' }), '/'));
+    const title = append(el('span', { class: 'song-breadcrumb-current' }), song.name);
+    crumbs.appendChild(title);
+    const renameBtn = el('button', {
+      type: 'button',
+      class: 'song-banner-btn',
+      title: 'Rename song',
+      'aria-label': 'Rename song',
+    });
+    renameBtn.appendChild(makeIcon('rename', 14, 'currentColor'));
+    renameBtn.addEventListener('click', () => renameSongGroup(song.id, song.name));
+    crumbs.appendChild(renameBtn);
+  }
+
+  row.appendChild(crumbs);
+
+  const actions = el('div', { class: 'song-context-actions' });
+  if (song) {
+    const addBtn = el('button', { type: 'button', class: 'btn btn-sm' });
+    addBtn.textContent = '+ Add';
+    addBtn.addEventListener('click', () => openSongAddSheet());
+    actions.appendChild(addBtn);
+  } else {
+    const newBtn = el('button', { type: 'button', class: 'btn btn-sm' });
+    newBtn.textContent = '+ New song';
+    newBtn.addEventListener('click', async () => {
+      const created = await createNewSongGroup();
+      if (created) {
+        state.songDetailId = created.id;
+        await loadFiles();
+      }
+    });
+    actions.appendChild(newBtn);
+  }
+  row.appendChild(actions);
+  banner.appendChild(row);
+
+  if (song) {
+    const meta = el('div', { class: 'song-context-meta' });
+    meta.appendChild(renderSongTagsRow(song));
+    meta.appendChild(renderSongNotesRow(song));
+    banner.appendChild(meta);
+  }
+}
+
 function renderListBanner(listMode, filterLabel) {
   const banner = document.getElementById('flat-filter-banner');
+  if (listMode === 'songs' && state.workspace === 'songwriting' && !state.songDetailId) {
+    renderSongContextHeader(null);
+    return;
+  }
   if (listMode === 'songs') {
     banner.style.display = 'block';
     banner.replaceChildren(document.createTextNode('Song groups — click a song to view its assets'));
@@ -377,8 +483,10 @@ function renderViewTabs() {
 }
 
 async function setView(view) {
+  if (state.workspace === 'songwriting' && view !== 'songs') return;
   if (state.view === view && state.page === 1 && !state.songDetailId) return;
   if (!(await confirmStudioUnsaved())) return;
+  state.appView = 'main';
   state.view = view;
   state.page = 1;
   state.songDetailId = null;
@@ -391,6 +499,31 @@ async function setView(view) {
     state.tagFilter = 'all';
   }
   pushAppHistory();
+  applyWorkspaceChrome();
+  loadFiles();
+}
+
+async function setWorkspace(workspace) {
+  if (workspace === 'songwriting' && !state.songwritingEnabled) return;
+  if (state.workspace === workspace && state.appView === 'main') return;
+  if (!(await confirmStudioUnsaved())) return;
+  state.appView = 'main';
+  state.workspace = workspace;
+  persistWorkspace(workspace);
+  if (workspace === 'songwriting') {
+    state.view = 'songs';
+    state.tagFilter = 'all';
+    state.currentDir = '';
+    state.page = 1;
+  } else {
+    state.view = 'browse';
+    state.songDetailId = null;
+    state.studioAssetPath = '';
+    state.songLayout = 'studio';
+    state.page = 1;
+  }
+  pushAppHistory();
+  applyWorkspaceChrome();
   loadFiles();
 }
 
@@ -914,8 +1047,8 @@ document.addEventListener('keydown', e => {
       closeSongTypeDropdown();
       return;
     }
-    if (document.getElementById('tag-modal').style.display !== 'none') {
-      closeSettingsModal();
+    if (state.appView === 'settings') {
+      leaveSettings();
       return;
     }
     closeTagDropdown();
@@ -1877,6 +2010,10 @@ function renderTable(items, flatList) {
 // ── Load files ────────────────────────────────────────────────────────────────
 
 async function loadFiles() {
+  if (state.appView === 'settings') {
+    applyWorkspaceChrome();
+    return;
+  }
   try {
     const params = new URLSearchParams({
       page: String(state.page),
@@ -1908,6 +2045,7 @@ async function loadFiles() {
     state.tags = data.tags;
     state.listMode = data.mode || 'browse';
     applyCategorySettings(data.settings);
+    await applySongwritingEnabledFromSettings(data.settings, { saveSettings: saveCategorySettings });
     if (data.sort) state.sort = data.sort;
     if (data.order) state.order = data.order;
 
@@ -1931,8 +2069,8 @@ async function loadFiles() {
     newSongBtn.style.display = state.listMode === 'songs' && !state.songDetailId ? '' : 'none';
     if (!state.songDetailId) {
       restoreTableHeaders();
-      updateSongPageChrome();
     }
+    applyWorkspaceChrome();
     updateListSearchPlaceholder();
     renderTagPills(data.tags);
     renderCategoryToggles();
@@ -1986,18 +2124,41 @@ function updateUploadTagSelect(tags) {
   }
 }
 
-// ── Settings modal ────────────────────────────────────────────────────────────
+// ── Settings page ─────────────────────────────────────────────────────────────
 
-function openSettingsModal() {
+function refreshSettingsPage() {
   renderExcludeTagsSettings();
   renderTagManager();
   updateSettingsShareDir(state.shareDir);
-  document.getElementById('change-storage-btn').style.display = state.shareDir ? '' : 'none';
-  document.getElementById('tag-modal').style.display = 'flex';
-  setTimeout(() => document.getElementById('new-tag-input').focus(), 50);
+  const changeBtn = document.getElementById('change-storage-btn');
+  if (changeBtn) changeBtn.style.display = state.shareDir ? '' : 'none';
+  const cb = document.getElementById('songwriting-enabled-cb');
+  if (cb) cb.checked = state.songwritingEnabled;
+}
+
+async function goToSettings() {
+  if (!(await confirmStudioUnsaved())) return;
+  state.appView = 'settings';
+  refreshSettingsPage();
+  applyWorkspaceChrome();
+  pushAppHistory();
+}
+
+function leaveSettings() {
+  if (history.length > 1) {
+    history.back();
+    return;
+  }
+  state.appView = 'main';
+  applyWorkspaceChrome();
+  loadFiles();
+}
+
+function openSettingsModal() {
+  goToSettings();
 }
 function closeSettingsModal() {
-  document.getElementById('tag-modal').style.display = 'none';
+  leaveSettings();
 }
 
 function openResetStorageModal() {
@@ -2166,12 +2327,18 @@ async function handleCreateTag() {
 
 async function waitForServerBack(maxMs) {
   const start = Date.now();
-  const q = new URLSearchParams({ page: '1', tag: 'all', dir: '' });
+  let sawDown = false;
   while (Date.now() - start < maxMs) {
     try {
-      const r = await fetch('/api/files?' + q.toString(), { cache: 'no-store' });
-      if (r.ok) return true;
-    } catch { /* server down */ }
+      const r = await fetch('/api/setup', { cache: 'no-store' });
+      if (r.ok) {
+        if (sawDown) return true;
+      } else {
+        sawDown = true;
+      }
+    } catch {
+      sawDown = true;
+    }
     await new Promise((r) => setTimeout(r, 400));
   }
   return false;
@@ -2207,6 +2374,11 @@ async function executeRestartServer() {
     return;
   }
 
+  if (data.restarting === false) {
+    showToast(data.message || 'Restart is not available', 'error');
+    return;
+  }
+
   showToast('Restarting server…', 'success');
   const ok = await waitForServerBack(60000);
   if (ok) {
@@ -2228,79 +2400,83 @@ document.getElementById('restart-modal').addEventListener('click', (e) => {
   if (e.target === document.getElementById('restart-modal')) closeRestartModal();
 });
 document.getElementById('restart-modal-box').addEventListener('click', (e) => e.stopPropagation());
-document.getElementById('gear-btn').addEventListener('click', openSettingsModal);
-document.getElementById('close-tag-modal').addEventListener('click', closeSettingsModal);
-document.getElementById('tag-modal').addEventListener('click', e => {
-  if (e.target === document.getElementById('tag-modal')) closeSettingsModal();
+document.getElementById('songwriting-enabled-cb')?.addEventListener('change', async (e) => {
+  const enabled = e.target.checked;
+  state.songwritingEnabled = enabled;
+  if (!enabled && state.workspace === 'songwriting') {
+    await setWorkspace('files');
+  }
+  await saveCategorySettings({ songwritingEnabled: enabled });
 });
-document.getElementById('tag-modal-box').addEventListener('click', e => e.stopPropagation());
 document.getElementById('create-tag-btn').addEventListener('click', handleCreateTag);
 document.getElementById('new-tag-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') handleCreateTag();
 });
 
-// ── Upload ────────────────────────────────────────────────────────────────────
+// ── Upload (see ui/upload.js) ─────────────────────────────────────────────────
 
-const dropZone  = document.getElementById('drop-zone');
-const fileInput = document.getElementById('file-input');
-const browseBtn = document.getElementById('browse-btn');
-const queue     = document.getElementById('queue');
-const notice    = document.getElementById('multi-file-notice');
+let pendingUploadFiles = null;
+let pendingAfterSongPick = null;
 
-function uploadFiles(files) {
-  const tagId = document.getElementById('upload-tag-select').value || null;
-  const arr   = Array.from(files);
-  notice.style.display = arr.length > 1 ? 'block' : 'none';
-
-  arr.forEach(file => {
-    const nameDiv = el('div', { class: 'name' });
-    nameDiv.textContent = file.name;
-    const fill = el('div', { class: 'progress-fill', style: { width: '0%' } });
-    const item = append(el('div', { class: 'queue-item' }), nameDiv, append(el('div', { class: 'progress-bar' }), fill));
-    queue.appendChild(item);
-
-    const fd = new FormData();
-    fd.append('files', file);
-    if (tagId) fd.append('tag_id', tagId);
-
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload?dir=' + encodeURIComponent(state.currentDir));
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) fill.style.width = Math.round(e.loaded / e.total * 100) + '%';
-    };
-    xhr.onload = () => {
-      if (xhr.status === 200) {
-        item.classList.add('status-done');
-        fill.style.width = '100%';
-        let msg = 'Uploaded ' + file.name;
-        try {
-          const data = JSON.parse(xhr.responseText);
-          const norm = (data.normalized || []).find((n) => n.from === file.name);
-          if (norm) msg = 'Saved as ' + norm.to;
-        } catch { /* ignore */ }
-        showToast(msg);
-        loadFiles();
-        setTimeout(() => { item.remove(); if (!queue.children.length) notice.style.display = 'none'; }, 2500);
-      } else {
-        item.classList.add('status-error');
-        showToast('Upload failed: ' + file.name, 'error');
+async function promptSongForUpload(files, afterSongPick) {
+  pendingUploadFiles = files;
+  pendingAfterSongPick = typeof afterSongPick === 'function' ? afterSongPick : null;
+  try {
+    const r = await fetch('/api/songs');
+    const songs = await r.json();
+    if (!songs.length) {
+      const song = await createNewSongGroup();
+      if (song && pendingUploadFiles) {
+        await uploadFilesForSong(song.id, pendingUploadFiles);
+        pendingUploadFiles = null;
       }
-    };
-    xhr.onerror = () => { item.classList.add('status-error'); showToast('Network error', 'error'); };
-    xhr.send(fd);
-  });
+      return;
+    }
+    openUploadPickSongModal(songs);
+  } catch {
+    showToast('Could not load songs', 'error');
+    pendingUploadFiles = null;
+  }
 }
 
-browseBtn.addEventListener('click', () => fileInput.click());
-dropZone.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', () => { if (fileInput.files.length) uploadFiles(fileInput.files); fileInput.value = ''; });
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
-});
+function openUploadPickSongModal(songs) {
+  const modal = document.getElementById('upload-pick-song-modal');
+  const list = document.getElementById('upload-pick-song-list');
+  if (!modal || !list) {
+    if (songs.length === 1 && pendingUploadFiles) {
+      uploadFilesForSong(songs[0].id, pendingUploadFiles);
+      pendingUploadFiles = null;
+    }
+    return;
+  }
+  list.replaceChildren();
+  for (const s of songs) {
+    const btn = el('button', { type: 'button', class: 'add-song-option' });
+    btn.textContent = s.name;
+    btn.addEventListener('click', async () => {
+      modal.style.display = 'none';
+      const files = pendingUploadFiles;
+      const afterPick = pendingAfterSongPick;
+      pendingUploadFiles = null;
+      pendingAfterSongPick = null;
+      if (files?.length) {
+        await uploadFilesForSong(s.id, files);
+      } else if (afterPick) {
+        const input = document.getElementById('song-any-input');
+        if (input) {
+          input.dataset.songId = String(s.id);
+          afterPick();
+        }
+      } else {
+        state.songDetailId = s.id;
+        pushAppHistory();
+        await openSongAssets(s.id);
+      }
+    });
+    list.appendChild(btn);
+  }
+  modal.style.display = 'flex';
+}
 
 document.getElementById('close-confirm-modal').addEventListener('click', () => closeConfirmModal(false));
 document.getElementById('confirm-modal-cancel-btn').addEventListener('click', () => closeConfirmModal(false));
@@ -2706,51 +2882,28 @@ async function saveSongNotes(songId, notes) {
   }
 }
 
-function renderSongDetailBanner(song, assetPaths) {
+function renderSongDetailBanner(song) {
+  if (state.workspace === 'songwriting') {
+    renderSongContextHeader(song);
+    return;
+  }
   const banner = document.getElementById('flat-filter-banner');
   banner.style.display = 'block';
   banner.replaceChildren();
-
   const topRow = el('div', { class: 'song-banner-row' });
   const back = el('a', { href: '#', class: 'song-banner-link' });
   back.textContent = '← All songs';
   back.addEventListener('click', async (e) => {
     e.preventDefault();
-    if (!(await confirmStudioUnsaved())) return;
-    state.songDetailId = null;
-    state.songLayout = 'studio';
-    state.studioAssetPath = '';
-    state.query = '';
-    listSearchEl.value = '';
-    studioState.editing = false;
-    studioState.dirty = false;
-    updateListSearchPlaceholder();
-    pushAppHistory();
-    loadFiles();
+    await goBackToSongsList();
   });
   topRow.appendChild(back);
   topRow.appendChild(document.createTextNode(' · Song: '));
   topRow.appendChild(append(el('strong'), song.name));
-
   const renameBtn = el('button', { type: 'button', class: 'song-banner-btn', title: 'Rename', 'aria-label': 'Rename song' });
   renameBtn.appendChild(makeIcon('rename', 14, 'currentColor'));
   renameBtn.addEventListener('click', () => renameSongGroup(song.id, song.name));
   topRow.appendChild(renameBtn);
-
-  /* List view disabled for now — studio only
-  const layoutToggle = el('div', { class: 'song-layout-toggle', role: 'group', 'aria-label': 'Layout' });
-  for (const [layout, label] of [['list', 'List'], ['studio', 'Studio']]) {
-    const btn = el('button', {
-      type: 'button',
-      class: 'song-layout-btn' + (state.songLayout === layout ? ' active' : ''),
-    });
-    btn.textContent = label;
-    btn.addEventListener('click', () => switchSongLayout(layout));
-    layoutToggle.appendChild(btn);
-  }
-  topRow.appendChild(layoutToggle);
-  */
-
   banner.appendChild(topRow);
   banner.appendChild(renderSongTagsRow(song));
   banner.appendChild(renderSongNotesRow(song));
@@ -2989,21 +3142,6 @@ function renderSongAssetTable(songId, assets, allAssetsForReorder) {
 
       tbody.appendChild(row);
     }
-  }
-}
-
-function updateSongPageChrome() {
-  const onSong = !!state.songDetailId;
-  document.getElementById('tag-pills').style.display = onSong ? 'none' : '';
-  document.getElementById('category-toggles-wrap').style.display = onSong ? 'none' : '';
-  document.getElementById('breadcrumbs').style.display = onSong ? 'none' : '';
-  document.getElementById('list-toolbar').style.display = onSong ? 'none' : '';
-  document.getElementById('table-wrap').style.display = onSong ? 'none' : '';
-  const studio = document.getElementById('song-studio');
-  if (studio) studio.style.display = onSong ? '' : 'none';
-  if (onSong) {
-    document.getElementById('pagination-top').replaceChildren();
-    document.getElementById('pagination-bottom').replaceChildren();
   }
 }
 
@@ -3367,9 +3505,88 @@ function updateStudioToolbar() {
     }
   }
 
+  if (studioState.editable && studioState.songId) {
+    actions.appendChild(studioTextBtn('Clone', 'Clone as new document', false, () => cloneStudioDocument()));
+  }
+
   actions.appendChild(studioIconBtn('trash', 'Remove from song or delete file', false, () => removeStudioAsset(), 'danger'));
 
   songStudioToolbarEl.appendChild(actions);
+}
+
+async function cloneStudioDocument() {
+  if (!(await confirmStudioUnsaved())) return;
+  const asset = studioState.assets.find((a) => a.path === studioState.assetPath);
+  if (!asset || !studioState.songId) return;
+  if (!isEditableFile(asset.name)) {
+    showToast('Only text documents can be cloned', 'error');
+    return;
+  }
+  const ext = '.' + fileExt(asset.name);
+  try {
+    const cr = await fetch('/api/content?path=' + encodeURIComponent(asset.path));
+    const contentData = await cr.json().catch(() => ({}));
+    if (!cr.ok) throw new Error(contentData.error || 'Could not read file');
+
+    const base = asset.name.slice(0, asset.name.length - ext.length);
+    const defaultName = base.replace(/-copy\d*$/i, '') + '-copy';
+    const filename = await showNameInput({
+      title: 'Clone document',
+      description: 'Creates a copy in the song folder and links it to this song.',
+      defaultValue: defaultName,
+      suffixes: NEW_SHEET_EXTENSIONS,
+      defaultSuffix: ext,
+      confirmLabel: 'Clone',
+    });
+    if (!filename) return;
+
+    const targetDir = resolveSongAssetDir(studioState.song, studioState.assets);
+    let createName = filename;
+    let fileData = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const r = await fetch('/api/files/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dir: targetDir,
+          filename: createName,
+          content: contentData.content,
+        }),
+      });
+      fileData = await r.json().catch(() => ({}));
+      if (r.ok) break;
+      if (r.status !== 409) {
+        showToast(fileData.error || 'Create failed', 'error');
+        return;
+      }
+      const stem = createName.slice(0, createName.length - ext.length);
+      createName = stem + '-2' + ext;
+    }
+    if (!fileData?.path) {
+      showToast('Could not create copy', 'error');
+      return;
+    }
+
+    const role = asset.role || (ext === '.md' || ext === '.pro' || ext === '.cho' ? 'Lyrics' : null);
+    const body = { path: fileData.path };
+    if (role) body.role = role.endsWith(' (copy)') ? role : role + ' (copy)';
+    const addR = await fetch('/api/songs/' + studioState.songId + '/assets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const addData = await addR.json().catch(() => ({}));
+    if (!addR.ok) {
+      showToast(addData.error || 'Could not add to song', 'error');
+      return;
+    }
+    showToast('Cloned as ' + fileData.name);
+    state.studioAssetPath = fileData.path;
+    pushAppHistory();
+    await openSongAssets(studioState.songId, { selectPath: fileData.path });
+  } catch (e) {
+    showToast(e.message || 'Clone failed', 'error');
+  }
 }
 
 async function saveStudioContent() {
@@ -3414,14 +3631,25 @@ function captureStudioAudioPlayback() {
 
 function renderSongStudioAudioBar(assets, songId, playback = null) {
   songStudioAudioEl.replaceChildren();
-  songStudioAudioEl.classList.remove('empty');
+  songStudioAudioEl.classList.remove('empty', 'sticky-audio');
   const audioAssets = assets.filter((a) => classifySongAsset(a) === 'audio');
   if (!audioAssets.length) {
     songStudioAudioEl.classList.add('empty');
-    songStudioAudioEl.textContent = 'No audio tracks — use + Add audio in the sidebar to add a recording.';
+    songStudioAudioEl.appendChild(append(el('span'), 'No audio tracks yet.'));
+    const uploadBtn = el('button', { type: 'button', class: 'btn btn-sm' });
+    uploadBtn.textContent = 'Upload recording';
+    uploadBtn.addEventListener('click', () => triggerSongAudioUpload(songId));
+    songStudioAudioEl.appendChild(uploadBtn);
+    const linkBtn = el('button', { type: 'button', class: 'btn-secondary btn-sm' });
+    linkBtn.textContent = 'Link existing';
+    linkBtn.addEventListener('click', () => {
+      const songName = studioState.song?.name || '';
+      openSongAddAssetsModal(songId, songName, assets.map((a) => a.path), { filter: 'audio' });
+    });
     return;
   }
 
+  songStudioAudioEl.classList.add('sticky-audio');
   songStudioAudioEl.appendChild(append(el('span', { class: 'song-studio-audio-label' }), 'Audio'));
   const select = el('select', { 'aria-label': 'Audio track' });
   let storedPath = '';
@@ -3480,15 +3708,22 @@ function renderSongStudioRailFooter(songId) {
   const assetPaths = studioState.assets.map((a) => a.path);
 
   const audioBtn = el('button', { type: 'button', class: 'song-studio-rail-add-btn' });
-  audioBtn.textContent = '+ Add audio';
-  audioBtn.addEventListener('click', () => openSongAddAssetsModal(songId, songName, assetPaths, { filter: 'audio' }));
+  audioBtn.textContent = '+ Upload recording';
+  audioBtn.addEventListener('click', () => triggerSongAudioUpload(songId));
+
+  const linkAudioBtn = el('button', { type: 'button', class: 'song-studio-rail-add-btn' });
+  linkAudioBtn.textContent = '+ Link audio';
+  linkAudioBtn.addEventListener('click', () => openSongAddAssetsModal(songId, songName, assetPaths, { filter: 'audio' }));
 
   const docBtn = el('button', { type: 'button', class: 'song-studio-rail-add-btn' });
   docBtn.textContent = '+ Add document';
   docBtn.addEventListener('click', () => createDocumentForSong(songId));
 
-  footer.appendChild(audioBtn);
-  footer.appendChild(docBtn);
+  const footerRow = el('div', { class: 'song-studio-rail-footer-row' });
+  footerRow.appendChild(audioBtn);
+  footerRow.appendChild(linkAudioBtn);
+  footerRow.appendChild(docBtn);
+  footer.appendChild(footerRow);
 }
 
 function renderSongStudioRail(songId, assets) {
@@ -3925,9 +4160,7 @@ async function openSongAssets(songId, options = {}) {
     const r = await fetch('/api/songs/' + songId);
     const data = await r.json();
     if (!r.ok) throw new Error();
-    const assetPaths = data.assets.map((a) => a.path);
-    renderSongDetailBanner(data, assetPaths);
-    updateSongPageChrome();
+    renderSongDetailBanner(data);
     const newSongBtnEl = document.getElementById('new-song-btn');
     if (newSongBtnEl) newSongBtnEl.style.display = 'none';
     document.getElementById('new-sheet-btn').style.display = 'none';
@@ -3936,6 +4169,7 @@ async function openSongAssets(songId, options = {}) {
       selectPath: options.selectPath || state.studioAssetPath,
       startEdit: options.startEdit,
     });
+    applyWorkspaceChrome();
     if (options.pushHistory) pushAppHistory();
     else replaceAppHistoryIfNeeded();
 
@@ -4101,12 +4335,70 @@ function closeSongAddAssetsModal() {
   songAddAssetsState = { songId: null, songName: '', assetPaths: new Set(), fileFilter: null, targetDir: '' };
 }
 
+function wireSongAddSheet() {
+  const addSheet = document.getElementById('songwriting-add-sheet');
+  document.getElementById('sheet-add-cancel')?.addEventListener('click', closeSongAddSheet);
+  addSheet?.addEventListener('click', (e) => {
+    if (e.target === addSheet) closeSongAddSheet();
+  });
+  document.getElementById('songwriting-add-sheet-box')?.addEventListener('click', (e) => e.stopPropagation());
+  document.getElementById('sheet-add-recording')?.addEventListener('click', () => {
+    closeSongAddSheet();
+    if (state.songDetailId) triggerSongAudioUpload(state.songDetailId);
+    else showToast('Open a song first', 'error');
+  });
+  document.getElementById('sheet-add-link-audio')?.addEventListener('click', () => {
+    closeSongAddSheet();
+    if (!state.songDetailId) {
+      showToast('Open a song first', 'error');
+      return;
+    }
+    const songName = studioState.song?.name || '';
+    const paths = (studioState.assets || []).map((a) => a.path);
+    openSongAddAssetsModal(state.songDetailId, songName, paths, { filter: 'audio' });
+  });
+  document.getElementById('sheet-add-document')?.addEventListener('click', async () => {
+    closeSongAddSheet();
+    if (state.songDetailId) await createDocumentForSong(state.songDetailId);
+    else showToast('Open a song first', 'error');
+  });
+  document.getElementById('close-upload-pick-song-modal')?.addEventListener('click', () => {
+    document.getElementById('upload-pick-song-modal').style.display = 'none';
+    pendingUploadFiles = null;
+    pendingAfterSongPick = null;
+  });
+  document.getElementById('upload-pick-song-modal')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('upload-pick-song-modal')) {
+      e.target.style.display = 'none';
+      pendingUploadFiles = null;
+      pendingAfterSongPick = null;
+    }
+  });
+  document.getElementById('upload-pick-song-modal-box')?.addEventListener('click', (e) => e.stopPropagation());
+}
+
 function wireFeatureEvents() {
   initNameInputModal();
+  initWorkspaceSwitcher({ setWorkspace, goToSettings, leaveSettings });
+  initUpload({
+    loadFiles,
+    openSongAssets,
+    resolveSongAssetDir,
+    promptSongForUpload,
+    pushAppHistory,
+    getStudioState: () => studioState,
+  });
+  wireSongAddSheet();
 
   document.getElementById('viewer-pdf-btn')?.addEventListener('click', exportViewerPdf);
   document.getElementById('viewer-add-song-btn')?.addEventListener('click', () => {
-    if (viewerState.relPath) openAddSongModal(viewerState.relPath);
+    if (!viewerState.relPath) return;
+    if (state.workspace === 'songwriting' && state.songDetailId) {
+      addSongTargetPath = viewerState.relPath;
+      addFileToSong(state.songDetailId, { navigate: false });
+      return;
+    }
+    openAddSongModal(viewerState.relPath);
   });
 
   document.getElementById('close-add-song-modal').addEventListener('click', closeAddSongModal);
@@ -4192,12 +4484,18 @@ function createNewSheetViaModal() {
 
 readUrlIntoState();
 wireFeatureEvents();
+applyWorkspaceChrome();
 bootstrapApp();
 window.addEventListener('popstate', async () => {
   const prevSong = state.songDetailId;
   const prevLayout = state.songLayout;
   const prevAsset = state.studioAssetPath;
   readUrlIntoState();
+  if (state.appView === 'settings') {
+    refreshSettingsPage();
+    applyWorkspaceChrome();
+    return;
+  }
   const leavingStudioEdit = studioState.editing && studioState.dirty && (
     prevSong !== state.songDetailId
     || prevLayout !== state.songLayout

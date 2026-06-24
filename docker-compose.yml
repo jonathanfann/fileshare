@@ -3,12 +3,20 @@ services:
     build: .
     ports:
       - "3000:3000"
+    env_file:
+      - path: .env
+        required: false
     environment:
       PORT: "3000"
       SHARE_DIR: /data/files
-      DB_PATH: /data/fileshare.db
+      DB_PATH: /data/db/fileshare.db
       DOCKER: "1"
+      DISPLAY_SHARE_DIR: ${DISPLAY_SHARE_DIR:-}
     volumes:
+      # Live codebase — restart picks up host changes without rebuilding the image
+      - ./server.js:/app/server.js
+      - ./public:/app/public
+      - ./scripts/stamp-build.js:/app/scripts/stamp-build.js
       - ./data/files:/data/files
       - ./data/db:/data/db
     restart: unless-stopped

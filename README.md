@@ -50,10 +50,58 @@ Environment variables (set in `docker-compose.yml` or override):
 |----------|---------|---------|
 | `PORT` | `3000` | Listen port |
 | `SHARE_DIR` | `/data/files` | File storage volume |
-| `DB_PATH` | `/data/fileshare.db` | SQLite database path |
-| `DOCKER` | `1` | Skips in-container restart spawn; use `docker compose restart` |
+| `DB_PATH` | `/data/db/fileshare.db` | SQLite database path (must match the `./data/db` volume mount) |
+| `DISPLAY_SHARE_DIR` | _(from `.env`)_ | Host path shown in the UI (set automatically by `migrate-to-docker.ps1`) |
+| `DOCKER` | `1` | Restart reloads from bind-mounted source (see Auto-start section) |
 
 When `SHARE_DIR` is set and valid, first-run folder setup is skipped automatically.
+
+### Migrate native install to Docker
+
+If you already run Fileshare with `npm start` and store files elsewhere (for example `D:\Fileshare`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/migrate-to-docker.ps1
+docker compose up -d --build
+```
+
+This copies your database into `./data/db/` and your share folder into `./data/files/`.
+
+## Auto-start on login
+
+Fileshare does **not** auto-start by itself. After a reboot you need either Docker (recommended) or a Windows Startup entry for native Node.
+
+### Docker (recommended)
+
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+2. Enable **Settings → General → Start Docker Desktop when you sign in**.
+3. From the project folder, run once:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+The compose file sets `restart: unless-stopped`, so when Docker starts after login the Fileshare container comes back automatically. Expect a short delay (30–60 seconds) after sign-in before **http://localhost:3000** responds.
+
+Verify after a reboot:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify-auto-start.ps1
+```
+
+Use `docker compose restart` only if the in-app restart button fails.
+
+**Restart server button (Docker):** `server.js`, `public/`, and the build stamp script are bind-mounted from your project folder. Clicking **Restart server** exits and recreates the container process, re-reads those files from disk, and refreshes the page — the same workflow as native `npm start`, without rebuilding the image. Run `docker compose up -d --build` only when `package.json` dependencies change.
+
+### Native Node (Windows fallback)
+
+If you prefer bare `node server.js` without Docker:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-windows-startup.ps1
+```
+
+This adds a Startup shortcut that runs `start-hidden.vbs` (background, no console). Remove with `-Remove`.
 
 ## Configuration
 
@@ -110,6 +158,10 @@ fileshare/
 │       └── ui/          # toast + future splits
 ├── Dockerfile
 ├── docker-compose.yml
+├── scripts/
+│   ├── migrate-to-docker.ps1
+│   ├── install-windows-startup.ps1
+│   └── verify-auto-start.ps1
 └── TODO.md
 ```
 

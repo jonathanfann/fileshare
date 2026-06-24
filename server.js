@@ -12,6 +12,9 @@ const DB_PATH = process.env.DB_PATH
   ? path.resolve(process.env.DB_PATH)
   : path.join(__dirname, 'fileshare.db');
 const ENV_SHARE_DIR = process.env.SHARE_DIR ? path.resolve(process.env.SHARE_DIR) : null;
+const ENV_DISPLAY_SHARE_DIR = process.env.DISPLAY_SHARE_DIR
+  ? String(process.env.DISPLAY_SHARE_DIR).trim()
+  : null;
 const IS_DOCKER = process.env.DOCKER === '1' || process.env.DOCKER === 'true';
 const LEGACY_DEFAULT_SHARE = path.join('D:', 'Fileshare');
 
@@ -38,7 +41,7 @@ function posixRel(dirRelative, baseName) {
 
 function decodeRelPath(q) {
   try {
-    const raw = decodeURIComponent(String(q || '').replace(/\+/g, ' '));
+    const raw = decodeURIComponent(String(q || ''));
     const rel = raw.replace(/\\/g, '/').replace(/^\/+/, '');
     const parts = rel.split('/').filter((p) => p.length && p !== '.' && p !== '..');
     return parts.join('/');
@@ -317,6 +320,12 @@ function bootstrapShareDir() {
 function getShareRoot() {
   if (cachedShareRoot === undefined) bootstrapShareDir();
   return cachedShareRoot;
+}
+
+/** Host-facing path for UI (Docker volume mount); internal ops still use getShareRoot(). */
+function getShareDirDisplay() {
+  if (ENV_DISPLAY_SHARE_DIR) return ENV_DISPLAY_SHARE_DIR;
+  return getShareRoot() || '';
 }
 
 function validateShareDirInput(input) {
@@ -676,18 +685,28 @@ function getCategorySettings() {
   return { excludeTags, showTags };
 }
 
-function saveCategorySettings(excludeTags, showTags) {
+function readSongwritingEnabledSetting() {
+  const row = stmts.getSetting.get('songwriting_enabled');
+  if (!row) return null;
+  return row.value === '1';
+}
+
+function saveCategorySettings(excludeTags, showTags, songwritingEnabled) {
   const exclude = sanitizeCategoryTagIds(excludeTags);
   const show = sanitizeCategoryTagIds(showTags).filter((id) => exclude.includes(id));
   stmts.setSetting.run('exclude_tag_ids', JSON.stringify(exclude));
   stmts.setSetting.run('show_tag_ids', JSON.stringify(show));
-  return { excludeTags: exclude, showTags: show };
+  if (songwritingEnabled !== undefined) {
+    stmts.setSetting.run('songwriting_enabled', songwritingEnabled ? '1' : '0');
+  }
+  return getAppSettings();
 }
 
 function getAppSettings() {
   return {
     ...getCategorySettings(),
-    shareDir: getShareRoot() || '',
+    shareDir: getShareDirDisplay(),
+    songwritingEnabled: readSongwritingEnabledSetting(),
   };
 }
 
@@ -792,7 +811,7 @@ app.get('/api/setup', (_req, res) => {
     const shareDir = getShareRoot();
     res.json({
       configured: !!shareDir,
-      shareDir: shareDir || '',
+      shareDir: getShareDirDisplay(),
       suggested: ENV_SHARE_DIR || LEGACY_DEFAULT_SHARE,
       docker: IS_DOCKER,
     });
@@ -806,8 +825,8 @@ app.post('/api/setup', (req, res) => {
     if (getShareRoot()) {
       return res.status(409).json({ error: 'Storage folder is already configured' });
     }
-    const shareDir = setShareRoot(req.body.shareDir);
-    res.json({ ok: true, shareDir });
+    setShareRoot(req.body.shareDir);
+    res.json({ ok: true, shareDir: getShareDirDisplay() });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Invalid folder path' });
   }
@@ -875,7 +894,7 @@ app.get('/api/files', requireShareRoot, (req, res) => {
         breadcrumbs: [{ name: 'Home', path: '', clearFilter: true }],
         tags,
         settings,
-        shareDir,
+        shareDir: getShareDirDisplay(),
       });
       return res.json(result);
     }
@@ -902,7 +921,7 @@ app.get('/api/files', requireShareRoot, (req, res) => {
         breadcrumbs: [{ name: 'Home', path: '', clearFilter: true }],
         tags,
         settings,
-        shareDir,
+        shareDir: getShareDirDisplay(),
       });
       return res.json(result);
     }
@@ -935,7 +954,7 @@ app.get('/api/files', requireShareRoot, (req, res) => {
       breadcrumbs,
       tags,
       settings,
-      shareDir,
+      shareDir: getShareDirDisplay(),
     });
     res.json(result);
   } catch (err) {
@@ -1239,11 +1258,12 @@ app.get('/api/settings', (_req, res) => {
 
 app.put('/api/settings', (req, res) => {
   try {
-    saveCategorySettings(
+    const songwritingEnabled = req.body.songwritingEnabled;
+    res.json(saveCategorySettings(
       req.body.excludeTags,
       req.body.showTags,
-    );
-    res.json(getAppSettings());
+      songwritingEnabled === undefined ? undefined : !!songwritingEnabled,
+    ));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1600,7 +1620,9 @@ app.delete('/api/songs/:id/assets', requireShareRoot, (req, res) => {
 // Self-restart (spawn a new Node process, then exit). LAN-only use; do not expose to the internet.
 app.post('/api/admin/restart', (req, res) => {
   if (IS_DOCKER) {
-    return res.json({ ok: true, restarting: false, docker: true, message: 'Use docker compose restart' });
+    res.json({ ok: true, restarting: true, docker: true });
+    setTimeout(() => process.exit(0), 250);
+    return;
   }
   res.json({ ok: true, restarting: true });
   setTimeout(() => {
@@ -1645,6 +1667,10 @@ app.listen(PORT, '0.0.0.0', () => {
   const shareDir = getShareRoot();
   if (shareDir) {
     console.log(`\nStoring files in: ${shareDir}`);
+    const displayDir = getShareDirDisplay();
+    if (displayDir && displayDir !== shareDir) {
+      console.log(`  Display path: ${displayDir}`);
+    }
   } else {
     console.log('\nStorage folder not configured — open the app in a browser to finish setup');
   }
