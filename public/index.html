@@ -189,12 +189,13 @@
     <div class="modal-header">
       <h3 id="setup-modal-title">Choose storage folder</h3>
     </div>
-    <p class="modal-desc" id="setup-modal-desc">Pick a folder on this PC where uploaded files will be stored. This is saved in the database and only needs to be set once.</p>
+    <p class="modal-desc" id="setup-modal-desc">Choose where Fileshare should store uploaded files.</p>
     <div class="setup-path-field">
       <label for="setup-path-input">Folder path</label>
-      <input type="text" id="setup-path-input" placeholder="e.g. D:\Fileshare" spellcheck="false" autocomplete="off" />
+      <input type="text" id="setup-path-input" placeholder="e.g. D:\Media" spellcheck="false" autocomplete="off" />
     </div>
     <div id="setup-error"></div>
+    <div id="setup-docker-instructions" style="display:none"></div>
     <div class="modal-footer">
       <button type="button" class="btn" id="setup-submit-btn">Continue</button>
     </div>

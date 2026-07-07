@@ -17,6 +17,6 @@ services:
       - ./server.js:/app/server.js
       - ./public:/app/public
       - ./scripts/stamp-build.js:/app/scripts/stamp-build.js
-      - ./data/files:/data/files
+      - ${SHARE_HOST_DIR:-./data/files}:/data/files
       - ./data/db:/data/db
     restart: unless-stopped
