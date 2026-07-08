@@ -14,6 +14,10 @@ import { initUpload, uploadFilesForSong, triggerSongAudioUpload } from './ui/upl
 // ── State (see state.js) ──────────────────────────────────────────────────────
 let settingsMigrated = false;
 let setupIsReset = false;
+// True when the server reports it is running in Docker. In that case the storage
+// location is fixed by the container's bind mount, so the setup dialog cannot save
+// a path — it shows the user the exact .env change to make instead.
+let setupIsDocker = false;
 
 function loadLocalCategoryTagIds() {
   try {
@@ -90,6 +94,7 @@ async function bootstrapApp() {
       await loadFiles();
       return;
     }
+    setupIsDocker = !!data.docker;
     markShareUnconfigured();
     showSetupModal({ suggested: data.suggested || '' });
   } catch {
@@ -111,14 +116,65 @@ function showSetupModal(options = {}) {
   const errEl = document.getElementById('setup-error');
   const titleEl = document.getElementById('setup-modal-title');
   const descEl = document.getElementById('setup-modal-desc');
+  const btn = document.getElementById('setup-submit-btn');
   errEl.textContent = '';
-  input.value = suggested;
-  titleEl.textContent = isReset ? 'Choose a new storage folder' : 'Choose storage folder';
-  descEl.textContent = isReset
-    ? 'Pick the folder Fileshare should use now. Existing files in the previous folder stay on disk but will not appear until you point back at that path.'
-    : 'Pick a folder on this PC where uploaded files will be stored. This is saved in the database and only needs to be set once.';
+  hideDockerSetupInstructions();
+  if (setupIsDocker) {
+    // Docker: the path can't be saved here — collect the desired host folder and
+    // show the exact .env change. Don't prefill the container path (`suggested`).
+    input.value = '';
+    titleEl.textContent = 'Storage folder (Docker)';
+    descEl.textContent = 'Fileshare is running in Docker, so its storage location is set by the container’s bind mount — not saved here. Type the folder on your machine where you want files kept and I’ll show you exactly what to change.';
+    btn.textContent = 'Show setup steps';
+  } else {
+    input.value = suggested;
+    titleEl.textContent = isReset ? 'Choose a new storage folder' : 'Choose storage folder';
+    descEl.textContent = isReset
+      ? 'Pick the folder Fileshare should use now. Existing files in the previous folder stay on disk but will not appear until you point back at that path.'
+      : 'Pick a folder on this machine where uploaded files will be stored. This is saved in the database and only needs to be set once.';
+    btn.textContent = 'Continue';
+  }
   modal.style.display = 'flex';
   setTimeout(() => input.focus(), 50);
+}
+
+function hideDockerSetupInstructions() {
+  const box = document.getElementById('setup-docker-instructions');
+  if (box) { box.replaceChildren(); box.style.display = 'none'; }
+}
+
+// Build (at runtime, from the path the user typed) the exact .env lines + command
+// needed to relocate storage in Docker. No host path is ever hard-coded in source.
+function renderDockerSetupInstructions(hostPath) {
+  const box = document.getElementById('setup-docker-instructions');
+  if (!box) return;
+  const mountSource = hostPath.replace(/\\/g, '/'); // compose bind mounts use forward slashes
+  const envLines = `SHARE_HOST_DIR=${mountSource}\nDISPLAY_SHARE_DIR=${hostPath}`;
+
+  const intro = el('p', { class: 'modal-desc', style: { marginTop: '4px' } });
+  append(intro, `To store files at ${hostPath}, add these two lines to your `, append(el('code'), '.env'),
+    ' file (next to docker-compose.yml):');
+
+  const pre = append(el('pre', { style: {
+    whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: '10px 0', padding: '10px 12px',
+    borderRadius: '6px', background: 'rgba(255,255,255,0.06)', fontFamily: 'monospace',
+    fontSize: '13px', userSelect: 'all',
+  } }), envLines);
+
+  const copyBtn = el('button', { type: 'button', class: 'btn-secondary btn-sm', onclick: () => {
+    navigator.clipboard?.writeText(envLines).then(
+      () => showToast('Copied .env lines', 'success'),
+      () => showToast('Copy failed', 'error'),
+    );
+  } });
+  append(copyBtn, 'Copy .env lines');
+
+  const cmd = el('p', { class: 'modal-desc', style: { marginTop: '10px' } });
+  append(cmd, 'Then apply it with ', append(el('code'), 'docker compose up -d'), '.');
+
+  box.replaceChildren();
+  append(box, intro, pre, copyBtn, cmd);
+  box.style.display = 'block';
 }
 
 function hideSetupModal() {
@@ -134,6 +190,7 @@ async function checkSetup() {
       return true;
     }
     if (!state.shareDir) {
+      setupIsDocker = !!data.docker;
       markShareUnconfigured();
       showSetupModal({ suggested: data.suggested || '' });
     }
@@ -154,6 +211,11 @@ async function submitSetup() {
     return;
   }
   errEl.textContent = '';
+  if (setupIsDocker) {
+    // Can't save a host path into the container — show the user what to change instead.
+    renderDockerSetupInstructions(shareDir);
+    return;
+  }
   btn.disabled = true;
   try {
     const r = await fetch('/api/setup', {

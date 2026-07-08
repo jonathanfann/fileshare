@@ -16,7 +16,6 @@ const ENV_DISPLAY_SHARE_DIR = process.env.DISPLAY_SHARE_DIR
   ? String(process.env.DISPLAY_SHARE_DIR).trim()
   : null;
 const IS_DOCKER = process.env.DOCKER === '1' || process.env.DOCKER === 'true';
-const LEGACY_DEFAULT_SHARE = path.join('D:', 'Fileshare');
 
 // ── Path safety (all file ops stay under the configured share root) ───────────
 
@@ -306,12 +305,6 @@ function bootstrapShareDir() {
     } catch { /* invalid or missing path */ }
     cachedShareRoot = null;
     return null;
-  }
-  const legacy = path.resolve(LEGACY_DEFAULT_SHARE);
-  if (fs.existsSync(legacy)) {
-    stmts.setSetting.run('share_dir', legacy);
-    cachedShareRoot = legacy;
-    return cachedShareRoot;
   }
   cachedShareRoot = null;
   return null;
@@ -812,7 +805,7 @@ app.get('/api/setup', (_req, res) => {
     res.json({
       configured: !!shareDir,
       shareDir: getShareDirDisplay(),
-      suggested: ENV_SHARE_DIR || LEGACY_DEFAULT_SHARE,
+      suggested: ENV_SHARE_DIR || '',
       docker: IS_DOCKER,
     });
   } catch (err) {

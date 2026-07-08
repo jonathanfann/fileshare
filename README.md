@@ -17,9 +17,9 @@ npm install
 
 ## First run — choose a storage folder
 
-On the first launch, the app asks where files should be stored. Pick any folder on the machine running the server (for example `D:\Fileshare` or `C:\Users\You\Documents\Fileshare`). The path is saved in the database and does not need to be set again.
+On the first launch, the app asks where files should be stored. Pick any folder on the machine running the server (for example `D:\Media` or `C:\Users\You\Documents\Files`). The path is saved in the database and does not need to be set again.
 
-If you already had files in `D:\Fileshare` from an older version, that folder is detected automatically and used without showing the setup screen.
+> **Running in Docker?** The storage location is set by the container's bind mount, not this dialog. See [Changing the storage folder in Docker](#changing-the-storage-folder-in-docker) below.
 
 ## Start the server
 
@@ -49,16 +49,36 @@ Environment variables (set in `docker-compose.yml` or override):
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PORT` | `3000` | Listen port |
-| `SHARE_DIR` | `/data/files` | File storage volume |
+| `SHARE_DIR` | `/data/files` | File storage path **inside the container** (leave as-is) |
+| `SHARE_HOST_DIR` | `./data/files` | **Host** folder mapped to `/data/files` (set in `.env`; this is where files actually live) |
 | `DB_PATH` | `/data/db/fileshare.db` | SQLite database path (must match the `./data/db` volume mount) |
-| `DISPLAY_SHARE_DIR` | _(from `.env`)_ | Host path shown in the UI (set automatically by `migrate-to-docker.ps1`) |
+| `DISPLAY_SHARE_DIR` | _(from `.env`)_ | Host path shown in the UI header |
 | `DOCKER` | `1` | Restart reloads from bind-mounted source (see Auto-start section) |
 
 When `SHARE_DIR` is set and valid, first-run folder setup is skipped automatically.
 
+### Changing the storage folder in Docker
+
+In Docker, **do not** use the in-app "Change storage folder" dialog — a path typed there is resolved
+inside the Linux container, not on your host. The real location is the bind mount
+`${SHARE_HOST_DIR:-./data/files}:/data/files` in `docker-compose.yml`. To move it:
+
+1. Move or copy your files to the new host folder.
+2. In `.env` (gitignored), set the host mount source and the display path:
+   ```
+   SHARE_HOST_DIR=D:/Media
+   DISPLAY_SHARE_DIR=D:\Media
+   ```
+   Use forward slashes for `SHARE_HOST_DIR` (Docker mount source); `DISPLAY_SHARE_DIR` is just the
+   header label, so write it however you like.
+3. Apply it: `docker compose up -d`.
+
+The tracked `docker-compose.yml` keeps the generic `./data/files` default, so no machine-specific path
+is ever committed.
+
 ### Migrate native install to Docker
 
-If you already run Fileshare with `npm start` and store files elsewhere (for example `D:\Fileshare`):
+If you already run Fileshare with `npm start` and store files elsewhere (for example `D:\Media`):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/migrate-to-docker.ps1

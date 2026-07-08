@@ -42,12 +42,8 @@ Stop-FileshareNative
 if (-not $ShareDir) {
     $ShareDir = Get-ShareDirFromDb
 }
-if (-not $ShareDir) {
-    $legacy = "D:\Fileshare"
-    if (Test-Path $legacy) { $ShareDir = $legacy }
-}
 if (-not $ShareDir -or -not (Test-Path $ShareDir)) {
-    throw "Share folder not found. Pass -ShareDir 'D:\Fileshare' or configure native Fileshare first."
+    throw "Share folder not found. Pass -ShareDir '<your share folder>' or configure native Fileshare first."
 }
 
 Write-Host "Source share folder: $ShareDir"
