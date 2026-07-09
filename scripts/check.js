@@ -21,7 +21,16 @@ function walk(dir, acc = []) {
 }
 
 console.log('Running ESLint…');
-execSync('npx eslint "public/js/**/*.js" server.js scripts/check.js scripts/verify.js scripts/stamp-build.js .cursor/hooks', {
+const eslintTargets = [
+  'public/js/**/*.js',
+  'server.js',
+  'scripts/check.js',
+  'scripts/verify.js',
+  'scripts/stamp-build.js',
+  fs.existsSync(path.join(root, '.cursor', 'hooks')) ? '.cursor/hooks' : null,
+].filter(Boolean);
+
+execSync(`npx eslint ${eslintTargets.map((target) => `"${target}"`).join(' ')}`, {
   cwd: root,
   stdio: 'inherit',
 });

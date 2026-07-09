@@ -19,6 +19,21 @@ let setupIsReset = false;
 // a path — it shows the user the exact .env change to make instead.
 let setupIsDocker = false;
 
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderMarkdownHtml(content) {
+  const renderer = new marked.Renderer();
+  renderer.html = ({ text }) => escapeHtml(text);
+  return marked.parse(content, { breaks: true, gfm: true, renderer });
+}
+
 function loadLocalCategoryTagIds() {
   try {
     const exclude = JSON.parse(localStorage.getItem(EXCLUDE_TAGS_KEY) || '[]');
@@ -1571,7 +1586,7 @@ function renderViewerText(content, editing, name = viewerState.name) {
     viewerBody.appendChild(div);
   } else if (fileExt(name) === 'md' && typeof marked !== 'undefined' && !editing) {
     const div = el('div', { class: 'viewer-markdown' });
-    div.innerHTML = marked.parse(content, { breaks: true, gfm: true });
+    div.innerHTML = renderMarkdownHtml(content);
     viewerBody.appendChild(div);
   } else {
     const pre = el('pre', { class: 'viewer-text-pre' });
@@ -3333,7 +3348,7 @@ function renderStudioTextContent(content, editing, name) {
     songStudioMainEl.appendChild(div);
   } else if (fileExt(name) === 'md' && typeof marked !== 'undefined') {
     const div = el('div', { class: 'viewer-markdown' });
-    div.innerHTML = marked.parse(content, { breaks: true, gfm: true });
+    div.innerHTML = renderMarkdownHtml(content);
     applyStudioPreviewScaleToElement(div);
     songStudioMainEl.appendChild(div);
   } else {
